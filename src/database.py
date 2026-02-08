@@ -105,3 +105,10 @@ def create_entry(user_id, landmark_id, images, status, weather_data):
     session.add(entry)
     session.commit()
     session.close()
+
+def get_all_users():
+    """Fetches all users to restore schedules on startup."""
+    session = Session()
+    users = session.query(User).all()
+    session.close()
+    return users

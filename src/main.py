@@ -1,5 +1,8 @@
 import os
 import logging
+import datetime
+import io
+import pytz
 from dotenv import load_dotenv
 
 from telegram import (
@@ -8,370 +11,351 @@ from telegram import (
 )
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, 
-    ConversationHandler, CallbackQueryHandler, filters, ContextTypes, Application
+    ConversationHandler, CallbackQueryHandler, filters, ContextTypes, Application, Defaults
 )
 
-# Internal Modules
 import database as db
 from weather import get_weather_data
 from utils.validators import parse_time
 from utils.files import save_telegram_file
 
-# Load Environment
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-# Logging Setup
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- STATE DEFINITIONS ---
-# Onboarding (0-5)
+# --- STATES ---
 NAME, FARM, LOCATION, P_TIME, V_TIME, L_COUNT = range(6)
+L_START, CAPTURE_WIDE, CAPTURE_CLOSE, CAPTURE_SOIL, CONFIRM_SET, LOG_STATUS = range(6, 12)
+VOICE_RECORD = 12
+EDIT_NAME, EDIT_SCHED_M, EDIT_SCHED_E = range(13, 16)
 
-# Collection (6-11)
-(
-    L_START,        
-    CAPTURE_WIDE,   
-    CAPTURE_CLOSE,  
-    CAPTURE_SOIL,   
-    CONFIRM_SET,    
-    LOG_STATUS      
-) = range(6, 12)
-
-# --- MENU SETUP ---
-async def post_init(application: Application):
-    """Sets the menu button commands when bot starts."""
-    await application.bot.set_my_commands([
-        BotCommand("start", "🏠 Home / Register"),
-        BotCommand("collection", "📸 Morning Check-in"),
-        BotCommand("profile", "👤 View My Details"),
-        BotCommand("cancel", "❌ Stop Current Action")
-    ])
-
-# --- COMMAND HANDLERS ---
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Entry point."""
-    user = db.get_user_profile(update.effective_user.id)
+# --- SCHEDULER UTILS ---
+async def schedule_user_jobs(application, user_id, p_time_str, v_time_str):
+    jq = application.job_queue
     
-    if user:
-        await update.message.reply_text(
-            f"👋 **Welcome back, {user.full_name}!**\n"
-            f"🌱 **Farm:** {user.farm_name}\n\n"
-            "**Quick Actions:**\n"
-            "/collection - Start Morning Check-in\n"
-            "/profile - View Details\n"
-            "/update_profile - Edit Settings",
-            parse_mode='Markdown'
-        )
-        return ConversationHandler.END
-        
-    await update.message.reply_text(
-        "👋 **Welcome to Farm Diary AI.**\nLet's set up your digital profile.\n\n"
-        "Step 1: What is your **Full Name**?",
-        parse_mode='Markdown'
-    )
-    return NAME
-
-async def view_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Shows the user profile."""
-    user = db.get_user_profile(update.effective_user.id)
-    if not user:
-        await update.message.reply_text("⚠️ No profile found. Please run /start.")
+    # 1. Clean Old Jobs
+    for name in [f"{user_id}_morning", f"{user_id}_evening"]:
+        for job in jq.get_jobs_by_name(name): job.schedule_removal()
+    
+    # 2. Parse Times with Timezone
+    try:
+        tz = pytz.timezone('Asia/Dubai')
+        p_time = datetime.datetime.strptime(p_time_str, "%H:%M").time().replace(tzinfo=tz)
+        v_time = datetime.datetime.strptime(v_time_str, "%H:%M").time().replace(tzinfo=tz)
+    except ValueError:
+        logger.error(f"Time format error for user {user_id}")
         return
 
-    # Fetch fresh landmarks
-    landmarks = db.get_user_landmarks(user.id)
-    lm_text = "\n".join([f"   • {lm.label}: {lm.last_status}" for lm in landmarks]) if landmarks else "   No landmarks set."
+    # 3. Schedule with chat_id (Standardized)
+    jq.run_daily(trigger_morning, p_time, chat_id=user_id, name=f"{user_id}_morning")
+    jq.run_daily(trigger_evening, v_time, chat_id=user_id, name=f"{user_id}_evening")
+    logger.info(f"Updated schedule for User {user_id} at {p_time} / {v_time}")
 
-    msg = (
-        f"👤 **Farmer Profile**\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"**Name:** {user.full_name}\n"
-        f"**Farm:** {user.farm_name}\n"
-        f"**Location:** {user.latitude:.4f}, {user.longitude:.4f}\n\n"
-        f"⏰ **Schedule:**\n"
-        f"   • Photos: {user.photo_time}\n"
-        f"   • Voice: {user.voice_time}\n\n"
-        f"📍 **Landmarks ({len(landmarks)}):**\n"
-        f"{lm_text}"
-    )
-    await update.message.reply_text(msg, parse_mode='Markdown')
+async def trigger_morning(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    try:
+        kb = [[InlineKeyboardButton("📸 Start Collection", callback_data="start_collection")]]
+        await context.bot.send_message(job.chat_id, "☀️ **Morning Check-in!**\nReady?", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        logger.info(f"Morning trigger sent to {job.chat_id}")
+    except Exception as e:
+        logger.error(f"Failed to send Morning trigger: {e}")
 
-async def update_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Triggers the onboarding flow again."""
-    await update.message.reply_text("⚙️ **Updating Profile**\nLet's re-enter your details.")
-    await update.message.reply_text("Step 1: What is your **Full Name**?", parse_mode='Markdown')
+async def trigger_evening(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    try:
+        kb = [[InlineKeyboardButton("🎙 Record Summary", callback_data="start_evening")]]
+        await context.bot.send_message(job.chat_id, "🌙 **Evening Summary**\nHow was the day?", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        logger.info(f"Evening trigger sent to {job.chat_id}")
+    except Exception as e:
+        logger.error(f"Failed to send Evening trigger: {e}")
+
+async def post_init(application: Application):
+    await application.bot.set_my_commands([
+        BotCommand("start", "🏠 Home"),
+        BotCommand("collection", "📸 Morning Check-in"),
+        BotCommand("record", "🎙 Evening Summary"),
+        BotCommand("profile", "👤 Dashboard"),
+        BotCommand("cancel", "❌ Stop")
+    ])
+    for user in db.get_all_users():
+        await schedule_user_jobs(application, user.id, user.photo_time, user.voice_time)
+
+# --- ADHOC HANDLER ---
+async def handle_adhoc_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = db.get_user_profile(update.effective_user.id)
+    if not user: return 
+    buf = io.BytesIO()
+    if update.message.photo:
+        f = await update.message.photo[-1].get_file()
+        await f.download_to_memory(buf)
+        save_telegram_file(buf, user.id, 99, "adhoc_photo")
+        await update.message.reply_text("📸 **Snapshot saved.**", parse_mode='Markdown')
+    elif update.message.voice:
+        f = await update.message.voice.get_file()
+        await f.download_to_memory(buf)
+        save_telegram_file(buf, user.id, 99, "adhoc_voice")
+        await update.message.reply_text("🎙 **Note saved.**", parse_mode='Markdown')
+
+# --- COMMANDS ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = db.get_user_profile(update.effective_user.id)
+    if user:
+        await update.message.reply_text(f"👋 **Welcome back, {user.full_name}!**", parse_mode='Markdown')
+        return ConversationHandler.END
+    await update.message.reply_text("👋 **Welcome.** Step 1: **Full Name**?", parse_mode='Markdown')
     return NAME
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "❌ Action cancelled. Type /start to return home.", 
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await update.message.reply_text("❌ Cancelled.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
-# --- ONBOARDING CONVERSATION ---
+async def view_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+        msg_func = query.edit_message_text
+    else:
+        user_id = update.effective_user.id
+        msg_func = update.message.reply_text
 
+    user = db.get_user_profile(user_id)
+    if not user: 
+        if update.message: return await start(update, context)
+        return
+
+    landmarks = db.get_user_landmarks(user.id)
+    lm_text = "\n".join([f"• {lm.label}: {lm.last_status}" for lm in landmarks])
+
+    msg = (f"👤 **{user.full_name}** | 🌱 {user.farm_name}\n📍 {user.latitude:.4f}, {user.longitude:.4f}\n"
+           f"⏰ P: {user.photo_time} | V: {user.voice_time}\n📍 **Landmarks:**\n{lm_text}")
+
+    kb = [[InlineKeyboardButton("✏️ Edit Name", callback_data="edit_name"), InlineKeyboardButton("✏️ Edit Schedule", callback_data="edit_sched")]]
+    await msg_func(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    return ConversationHandler.END
+
+# --- EDIT HANDLERS ---
+async def edit_name_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text("✏️ New **Name**:")
+    return EDIT_NAME
+async def edit_name_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = db.get_user_profile(update.effective_user.id)
+    db.save_user_profile({'id': user.id, 'name': update.message.text, 'farm': user.farm_name, 'lat': user.latitude, 'lon': user.longitude, 'p_time': user.photo_time, 'v_time': user.voice_time, 'l_count': user.landmark_count})
+    await update.message.reply_text("✅ Name updated.")
+    return await view_profile(update, context)
+async def edit_sched_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text("✏️ New **Morning Time** (e.g. '7'):")
+    return EDIT_SCHED_M
+async def edit_sched_m(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    t = parse_time(update.message.text, is_evening=False)
+    if not t: return EDIT_SCHED_M
+    context.user_data['new_p_time'] = t
+    await update.message.reply_text("✏️ New **Evening Time** (e.g. '6'):")
+    return EDIT_SCHED_E
+async def edit_sched_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    t = parse_time(update.message.text, is_evening=True)
+    if not t: return EDIT_SCHED_E
+    user = db.get_user_profile(update.effective_user.id)
+    db.save_user_profile({'id': user.id, 'name': user.full_name, 'farm': user.farm_name, 'lat': user.latitude, 'lon': user.longitude, 'p_time': context.user_data['new_p_time'], 'v_time': t, 'l_count': user.landmark_count})
+    await schedule_user_jobs(context.application, user.id, context.user_data['new_p_time'], t)
+    await update.message.reply_text("✅ Schedule updated.")
+    return await view_profile(update, context)
+
+# --- ONBOARDING ---
 async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['name'] = update.message.text
-    await update.message.reply_text("Step 2: What is the **Name of your Farm**?", parse_mode='Markdown')
+    await update.message.reply_text("Step 2: **Farm Name**?", parse_mode='Markdown')
     return FARM
-
 async def get_farm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['farm'] = update.message.text
     kb = [[KeyboardButton("📍 Share Farm Location", request_location=True)]]
-    await update.message.reply_text(
-        "Step 3: Tap the button below to share the **Farm's Location**.",
-        reply_markup=ReplyKeyboardMarkup(kb, one_time_keyboard=True, resize_keyboard=True),
-        parse_mode='Markdown'
-    )
+    await update.message.reply_text("Step 3: **Location**.", reply_markup=ReplyKeyboardMarkup(kb, one_time_keyboard=True), parse_mode='Markdown')
     return LOCATION
-
 async def get_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loc = update.message.location
-    context.user_data['lat'] = loc.latitude
-    context.user_data['lon'] = loc.longitude
-    await update.message.reply_text(
-        "✅ Location verified.\n\n"
-        "Step 4: Time for **Morning Photos**?\n(e.g., type '7' for 07:00 or '7:30')", 
-        reply_markup=ReplyKeyboardRemove(), 
-        parse_mode='Markdown'
-    )
+    context.user_data['lat'], context.user_data['lon'] = loc.latitude, loc.longitude
+    await update.message.reply_text("Step 4: **Morning Time**? (e.g. '7')", reply_markup=ReplyKeyboardRemove(), parse_mode='Markdown')
     return P_TIME
-
 async def get_p_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t = parse_time(update.message.text, is_evening=False)
-    if not t:
-        await update.message.reply_text("Invalid format. Try '7' or '07:00'.")
-        return P_TIME
+    if not t: return P_TIME
     context.user_data['p_time'] = t
-    await update.message.reply_text(
-        "Step 5: Time for **Evening Voice Summary**?\n(e.g., type '6' for 18:00 or '6:30')", 
-        parse_mode='Markdown'
-    )
+    await update.message.reply_text("Step 5: **Evening Time**? (e.g. '6')", parse_mode='Markdown')
     return V_TIME
-
 async def get_v_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     t = parse_time(update.message.text, is_evening=True)
-    if not t:
-        await update.message.reply_text("Invalid format. Try '6' or '18:00'.")
-        return V_TIME
+    if not t: return V_TIME
     context.user_data['v_time'] = t
     kb = [["3", "4", "5"]]
-    await update.message.reply_text(
-        "Step 6: How many **Landmarks** (specific spots) to track?", 
-        reply_markup=ReplyKeyboardMarkup(kb, one_time_keyboard=True, resize_keyboard=True), 
-        parse_mode='Markdown'
-    )
+    await update.message.reply_text("Step 6: **Landmarks Count**?", reply_markup=ReplyKeyboardMarkup(kb, one_time_keyboard=True), parse_mode='Markdown')
     return L_COUNT
-
 async def get_l_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         count = int(update.message.text)
-        if count < 3 or count > 5: raise ValueError
-        
-        data = {
-            'id': update.effective_user.id,
-            'name': context.user_data['name'],
-            'farm': context.user_data['farm'],
-            'lat': context.user_data['lat'],
-            'lon': context.user_data['lon'],
-            'p_time': context.user_data['p_time'],
-            'v_time': context.user_data['v_time'],
-            'l_count': count
-        }
-        db.save_user_profile(data)
-        
-        await update.message.reply_text(
-            "✅ **Profile Saved!**\n\n"
-            "I am ready. Use /collection to start a morning check-in.",
-            reply_markup=ReplyKeyboardRemove(),
-            parse_mode='Markdown'
-        )
+        if count not in [3,4,5]: raise ValueError
+        user_id = update.effective_user.id
+        db.save_user_profile({'id': user_id, 'name': context.user_data['name'], 'farm': context.user_data['farm'], 'lat': context.user_data['lat'], 'lon': context.user_data['lon'], 'p_time': context.user_data['p_time'], 'v_time': context.user_data['v_time'], 'l_count': count})
+        await schedule_user_jobs(context.application, user_id, context.user_data['p_time'], context.user_data['v_time'])
+        await update.message.reply_text("✅ **Saved!**", reply_markup=ReplyKeyboardRemove(), parse_mode='Markdown')
         return ConversationHandler.END
-        
-    except ValueError:
-        await update.message.reply_text("Please select 3, 4, or 5.")
-        return L_COUNT
+    except ValueError: return L_COUNT
 
-# --- COLLECTION CONVERSATION (MODULE 2) ---
-
+# --- COLLECTION ---
 async def start_collection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query: await update.callback_query.answer()
+    msg_func = update.callback_query.message.reply_text if update.callback_query else update.message.reply_text
     user_id = update.effective_user.id
     landmarks = db.get_user_landmarks(user_id)
-    
-    if not landmarks:
-        await update.message.reply_text("⚠️ No landmarks found. Run /update_profile first.")
-        return ConversationHandler.END
-        
-    context.user_data['landmarks'] = landmarks
-    context.user_data['current_idx'] = 0
-    context.user_data['temp_photos'] = {}
-    
-    user = db.get_user_profile(user_id)
-    weather = get_weather_data(user.latitude, user.longitude)
+    if not landmarks: return ConversationHandler.END
+    context.user_data.update({'landmarks': landmarks, 'current_idx': 0, 'temp_photos': {}})
+    weather = get_weather_data(db.get_user_profile(user_id).latitude, db.get_user_profile(user_id).longitude)
     context.user_data['weather'] = weather or {}
-    
-    w_str = weather['display_str'] if weather else "Offline"
-    await update.message.reply_text(f"🌦 **Weather:** {w_str}", parse_mode='Markdown')
-    
+    await msg_func(f"🌦 **Weather:** {weather.get('display_str', 'N/A')}", parse_mode='Markdown')
     return await request_landmark_photos(update, context)
 
 async def request_landmark_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query: msg_obj = update.callback_query.message
+    elif update.message: msg_obj = update.message
+    else: return ConversationHandler.END
     idx = context.user_data['current_idx']
-    landmarks = context.user_data['landmarks']
-    
-    # Handle CallbackQuery vs Message trigger
-    if update.callback_query:
-        msg_obj = update.callback_query.message
-    else:
-        msg_obj = update.message
-
-    if idx >= len(landmarks):
-        await msg_obj.reply_text("✅ **Check-in Complete!** See you this evening.")
+    if idx >= len(context.user_data['landmarks']):
+        await msg_obj.reply_text("✅ **Done!**")
         return ConversationHandler.END
-        
-    lm = landmarks[idx]
-    
-    await msg_obj.reply_text(
-        f"📍 **{lm.label}** ({idx+1}/{len(landmarks)})\n"
-        f"Last Status: {lm.last_status}\n\n"
-        "1️⃣ **WIDE SHOT**\n"
-        "Tap the 📎 (Paperclip) or 📷 icon to take a photo.",
-        parse_mode='Markdown',
-        reply_markup=ReplyKeyboardRemove()
-    )
+    lm = context.user_data['landmarks'][idx]
+    await msg_obj.reply_text(f"📍 **{lm.label}** ({idx+1}/{len(context.user_data['landmarks'])})\nStatus: {lm.last_status}\n\n📸 **Capture 3 Views:**\n1. Wide\n2. Close-up\n3. Soil\n\n💡 *Tip: Send 3 photos at once!*", parse_mode='Markdown', reply_markup=ReplyKeyboardRemove())
     return CAPTURE_WIDE
 
-async def handle_photo_step(update: Update, context: ContextTypes.DEFAULT_TYPE, key, next_step, next_prompt):
-    """Generic handler with CRITICAL FIX for await get_file()."""
-    if not update.message.photo:
-        await update.message.reply_text("⚠️ Please send a photo.")
-        return None
-
-    # --- THE FIX IS HERE ---
-    # We must await get_file() because it's an async coroutine
-    photo_file = await update.message.photo[-1].get_file() 
-    
-    path = await photo_file.download_to_drive(f"data/media/{update.effective_user.id}_temp_{key}.jpg")
+async def handle_photo_step(update: Update, context: ContextTypes.DEFAULT_TYPE, key, next_step):
+    if not update.message.photo: return None
+    f = await update.message.photo[-1].get_file()
+    path = await f.download_to_drive(f"data/media/{update.effective_user.id}_temp_{key}.jpg")
     context.user_data['temp_photos'][key] = path
-    
     if next_step == CONFIRM_SET:
-        kb = [
-            [InlineKeyboardButton("✅ Confirm Photos", callback_data="confirm_set")],
-            [InlineKeyboardButton("🔄 Retake Landmark", callback_data="retake_set")]
-        ]
-        await update.message.reply_text("Photos captured. Look good?", reply_markup=InlineKeyboardMarkup(kb))
+        kb = [[InlineKeyboardButton("✅ Confirm", callback_data="confirm"), InlineKeyboardButton("🔄 Retake", callback_data="retake")]]
+        await update.message.reply_text("Photos received. Confirm?", reply_markup=InlineKeyboardMarkup(kb))
         return CONFIRM_SET
-    
-    await update.message.reply_text(next_prompt, parse_mode='Markdown')
     return next_step
 
-async def handle_wide(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return await handle_photo_step(
-        update, context, 'wide', CAPTURE_CLOSE, 
-        "2️⃣ **CLOSE-UP**\nNow take a photo of the leaves or fruit."
-    )
-
-async def handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return await handle_photo_step(
-        update, context, 'close', CAPTURE_SOIL, 
-        "3️⃣ **SOIL / BASE**\nFinally, a photo of the roots/soil."
-    )
-
-async def handle_soil(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return await handle_photo_step(update, context, 'soil', CONFIRM_SET, "")
-
+async def handle_wide(update: Update, context: ContextTypes.DEFAULT_TYPE): return await handle_photo_step(update, context, 'wide', CAPTURE_CLOSE)
+async def handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE): return await handle_photo_step(update, context, 'close', CAPTURE_SOIL)
+async def handle_soil(update: Update, context: ContextTypes.DEFAULT_TYPE): return await handle_photo_step(update, context, 'soil', CONFIRM_SET)
 async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
-    if query.data == "retake_set":
-        await query.edit_message_text("Okay, restarting this landmark.")
+    if query.data == "retake": 
+        await query.edit_message_text("Restarting spot...")
         return await request_landmark_photos(update, context)
-        
-    if query.data == "confirm_set":
-        kb = [
-            [InlineKeyboardButton("🟢 Healthy", callback_data="Healthy")],
-            [InlineKeyboardButton("🔴 Issue / Pest", callback_data="Issue")],
-            [InlineKeyboardButton("🟠 Not Sure", callback_data="Unsure")]
-        ]
-        await query.edit_message_text("How does it look today?", reply_markup=InlineKeyboardMarkup(kb))
-        return LOG_STATUS
-
+    kb = [[InlineKeyboardButton("🟢 Healthy", callback_data="Healthy"), InlineKeyboardButton("🔴 Issue", callback_data="Issue"), InlineKeyboardButton("🟠 Unsure", callback_data="Unsure")]]
+    await query.edit_message_text("Status?", reply_markup=InlineKeyboardMarkup(kb))
+    return LOG_STATUS
 async def log_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    status = query.data
-    
-    # Save Logic
     user_id = update.effective_user.id
-    lm_idx = context.user_data['current_idx']
-    lm_id = context.user_data['landmarks'][lm_idx].id
-    
-    saved_paths = {}
-    for p_type, temp_path in context.user_data['temp_photos'].items():
-        # Open temp file and pass to util
-        with open(temp_path, 'rb') as f:
-            final_path = save_telegram_file(f, user_id, lm_id, p_type)
-            saved_paths[p_type] = final_path
-        
-        # Cleanup Temp
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-            
-    db.create_entry(
-        user_id, lm_id, saved_paths, status, 
-        context.user_data.get('weather', {})
-    )
-    
-    await query.edit_message_text(f"✅ Saved Landmark {lm_idx + 1} as **{status}**.", parse_mode='Markdown')
+    lm = context.user_data['landmarks'][context.user_data['current_idx']]
+    saved = {}
+    for k, p in context.user_data['temp_photos'].items():
+        with open(p, 'rb') as f: saved[k] = save_telegram_file(f, user_id, lm.id, k)
+        if os.path.exists(p): os.remove(p)
+    db.create_entry(user_id, lm.id, saved, query.data, context.user_data.get('weather', {}))
+    await query.edit_message_text(f"✅ Saved **{lm.label}**.", parse_mode='Markdown')
     context.user_data['current_idx'] += 1
     return await request_landmark_photos(update, context)
 
-if __name__ == '__main__':
-    if not TOKEN:
-        print("Error: TELEGRAM_TOKEN not found in .env")
-        exit(1)
-        
-    app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
+# --- EVENING ---
+async def start_evening_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query: await update.callback_query.answer()
+    msg_func = update.callback_query.message.reply_text if update.callback_query else update.message.reply_text
+    await msg_func("🎙 **Recording...**\nTap mic to record.", parse_mode='Markdown')
+    return VOICE_RECORD
+async def save_voice_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.voice: return VOICE_RECORD
+    f = await update.message.voice.get_file()
+    buf = io.BytesIO()
+    await f.download_to_memory(buf)
+    save_telegram_file(buf, update.effective_user.id, 0, "daily_summary")
+    await update.message.reply_text("✅ **Summary Saved.**", parse_mode='Markdown')
+    return ConversationHandler.END
+
+# --- DEBUG ---
+async def debug_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows EXACT run date and timezone of jobs."""
+    jobs = context.job_queue.jobs()
+    if not jobs:
+        await update.message.reply_text("📭 No jobs scheduled.")
+        return
+
+    text = "📋 **Active Jobs:**\n"
+    for job in jobs:
+        # Show Full Date + Timezone
+        next_t = job.next_t.strftime('%Y-%m-%d %H:%M:%S %Z') if job.next_t else "N/A"
+        text += f"- `{job.name}`:\n  Runs at **{next_t}**\n"
     
-    # 1. Onboarding
-    # Note: filters.TEXT & ~filters.COMMAND prevents "/profile" from being captured as a name
-    onboard_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start), CommandHandler('update_profile', update_profile)],
+    await update.message.reply_text(text, parse_mode='Markdown')
+    
+async def debug_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.datetime.now().astimezone()
+    await update.message.reply_text(f"🕒 **Local:** {now.strftime('%H:%M:%S')}\n📍 **Zone:** {now.tzname()}")
+
+# --- BUILD ---
+if __name__ == '__main__':
+    if not TOKEN: exit("No TOKEN")
+    defaults = Defaults(tzinfo=pytz.timezone('Asia/Dubai')) # GLOBAL TIMEZONE DEFAULT
+    app = ApplicationBuilder().token(TOKEN).defaults(defaults).post_init(post_init).build()
+
+    onboard = ConversationHandler(
+        entry_points=[CommandHandler('start', start)],
         states={
             NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_name)],
             FARM: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_farm)],
             LOCATION: [MessageHandler(filters.LOCATION, get_location)],
             P_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_p_time)],
             V_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_v_time)],
-            L_COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_l_count)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)]
+            L_COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_l_count)]
+        }, fallbacks=[CommandHandler('cancel', cancel)]
     )
-    
-    # 2. Collection
-    collection_handler = ConversationHandler(
-        entry_points=[CommandHandler('collection', start_collection)],
+
+    edit_profile = ConversationHandler(
+        entry_points=[
+            CommandHandler('profile', view_profile),
+            CallbackQueryHandler(edit_name_start, pattern="^edit_name$"),
+            CallbackQueryHandler(edit_sched_start, pattern="^edit_sched$")
+        ],
+        states={
+            EDIT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_name_save)],
+            EDIT_SCHED_M: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_sched_m)],
+            EDIT_SCHED_E: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_sched_save)],
+        }, fallbacks=[CommandHandler('cancel', cancel)]
+    )
+
+    collection = ConversationHandler(
+        entry_points=[CommandHandler('collection', start_collection), CallbackQueryHandler(start_collection, pattern="^start_collection$")],
         states={
             CAPTURE_WIDE: [MessageHandler(filters.PHOTO, handle_wide)],
             CAPTURE_CLOSE: [MessageHandler(filters.PHOTO, handle_close)],
             CAPTURE_SOIL: [MessageHandler(filters.PHOTO, handle_soil)],
             CONFIRM_SET: [CallbackQueryHandler(handle_confirmation)],
             LOG_STATUS: [CallbackQueryHandler(log_status)]
-        },
+        }, fallbacks=[CommandHandler('cancel', cancel)]
+    )
+
+    evening = ConversationHandler(
+        entry_points=[CommandHandler('record', start_evening_flow), CallbackQueryHandler(start_evening_flow, pattern="^start_evening$")],
+        states={VOICE_RECORD: [MessageHandler(filters.VOICE, save_voice_note)]},
         fallbacks=[CommandHandler('cancel', cancel)]
     )
+
+    app.add_handler(onboard)
+    app.add_handler(edit_profile)
+    app.add_handler(collection)
+    app.add_handler(evening)
+    app.add_handler(MessageHandler(filters.PHOTO | filters.VOICE, handle_adhoc_media))
+    app.add_handler(CommandHandler("jobs", debug_jobs))
+    app.add_handler(CommandHandler("time", debug_time))
     
-    app.add_handler(onboard_handler)
-    app.add_handler(collection_handler)
-    app.add_handler(CommandHandler("profile", view_profile))
-    
-    print("🤖 Farm Diary Bot is LIVE. Press Ctrl+C to stop.")
+    print("🤖 Farm Diary Bot LIVE.")
     app.run_polling()

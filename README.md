@@ -67,7 +67,3 @@ A Telegram bot designed to help farmers track their farm's status, log daily che
   - `utils/`: Utility functions.
 - `data/`: Directory for storing media and other data.
 - `requirement.txt`: Python dependencies.
-
-## License
-
-[MIT License](LICENSE)
