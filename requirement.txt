@@ -9,3 +9,5 @@ python-dotenv==1.2.1
 python-telegram-bot==22.6
 SQLAlchemy==2.0.46
 typing_extensions==4.15.0
+pytz
+requests
