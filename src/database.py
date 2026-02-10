@@ -95,6 +95,31 @@ def get_user_landmarks(user_id):
     session.close()
     return landmarks
 
+def get_routine_landmarks(user_id):
+    """Returns only the required landmarks for morning routine (excludes Ad-Hoc)"""
+    session = Session()
+    landmarks = session.query(Landmark).filter(
+        Landmark.user_id == user_id,
+        Landmark.label != "Ad-Hoc"
+    ).all()
+    session.close()
+    return landmarks
+
+def get_or_create_adhoc_landmark(user_id):
+    """Ensures an Ad-Hoc landmark exists for the user"""
+    session = Session()
+    lm = session.query(Landmark).filter_by(user_id=user_id, label="Ad-Hoc").first()
+    if not lm:
+        lm = Landmark(user_id=user_id, label="Ad-Hoc")
+        session.add(lm)
+        session.commit()
+        # Refresh to get ID
+        session.refresh(lm)
+    
+    lm_id = lm.id
+    session.close()
+    return lm_id
+
 def create_entry(user_id, landmark_id, images, status, weather_data):
     session = Session()
     
@@ -248,7 +273,14 @@ def get_daily_completion_stats(user_id, days=30):
     
     # Calculate perfect days
     for date_str, data in entries_by_date.items():
-        if len(data['entries']) == total_landmarks and data['has_evening_summary']:
+        # Filter entries to only count routine landmarks
+        routine_entries = [e for e in data['entries'] if e['landmark_name'] != "Ad-Hoc"]
+        
+        # We need the count of routine landmarks at that time, but for now using current count is best approximation
+        # (Assuming landmark count doesn't change often)
+        # To be precise, we should compare against user.landmark_count which was stored in profile
+        
+        if len(routine_entries) >= total_landmarks and data['has_evening_summary']:
             stats['perfect_days'] += 1
     
     # Calculate streaks

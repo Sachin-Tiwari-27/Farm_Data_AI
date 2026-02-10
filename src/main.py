@@ -51,6 +51,30 @@ async def ensure_registered(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return None
     return user
 
+# --- HELPER: ROUTINE CHECK (NEW) ---
+def is_routine_done(user_id, routine_type):
+    """Checks if the user has already completed the routine today."""
+    today = datetime.datetime.now().date()
+    # db.get_entries_by_date_range returns data keyed by YYYY-MM-DD string
+    entries = db.get_entries_by_date_range(user_id, today, today)
+    date_str = today.strftime('%Y-%m-%d')
+    day_data = entries.get(date_str)
+    
+    if not day_data:
+        return False
+        
+    if routine_type == 'evening':
+        return day_data.get('has_evening_summary', False)
+        
+    if routine_type == 'morning':
+        # Check completion (Filter out Ad-Hoc)
+        entered_landmarks = [e for e in day_data.get('entries', []) if e['landmark_name'] != "Ad-Hoc"]
+        # Use only routine landmarks for total count
+        total = len(db.get_routine_landmarks(user_id))
+        return len(entered_landmarks) >= total
+        
+    return False
+
 # --- SCHEDULER UTILS ---
 async def schedule_user_jobs(application, user_id, p_time_str, v_time_str):
     jq = application.job_queue
@@ -116,7 +140,11 @@ async def view_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg_func = update.message.reply_text
 
     user = db.get_user_profile(user_id)
-    landmarks = db.get_user_landmarks(user.id)
+    # Use routine landmarks only for profile display or clearly mark Ad-Hoc
+    landmarks = db.get_user_landmarks(user_id)
+    # Sort: Routine first, then Ad-Hoc
+    landmarks.sort(key=lambda x: (x.label == "Ad-Hoc", x.id))
+    
     lm_text = "\n".join([f"• {lm.label}: {lm.last_status}" for lm in landmarks])
 
     msg = (f"👤 **{user.full_name}** | 🌱 {user.farm_name}\n📍 {user.latitude:.4f}, {user.longitude:.4f}\n"
@@ -195,11 +223,11 @@ async def show_history_period(update: Update, context: ContextTypes.DEFAULT_TYPE
         day_name = date_obj.strftime('%A')
         
         # Check completion
-        total_landmarks = len(db.get_user_landmarks(user_id))
-        completed_landmarks = len(day_data['entries'])
+        total_landmarks = len(db.get_routine_landmarks(user_id))
+        completed_landmarks = len([e for e in day_data['entries'] if e['landmark_name'] != "Ad-Hoc"])
         has_evening = day_data['has_evening_summary']
         
-        completion_icon = "✅" if completed_landmarks == total_landmarks else "⚠️"
+        completion_icon = "✅" if completed_landmarks >= total_landmarks else "⚠️"
         evening_icon = "🎙" if has_evening else "➖"
         
         message += f"**{date_obj.strftime('%b %d')}** ({day_name}) {completion_icon}\n"
@@ -371,7 +399,19 @@ async def start_collection(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await ensure_registered(update, context): return ConversationHandler.END
     
     user_id = update.effective_user.id
-    landmarks = db.get_user_landmarks(user_id)
+    
+    # NEW: Check if routine is already done today
+    if is_routine_done(user_id, 'morning'):
+        await update.message.reply_text(
+            "✅ **Morning Check-in Complete**\n"
+            "You have already checked all spots today.\n\n"
+            "💡 **Tip:** Send photos directly to this chat to save them as **Ad-Hoc** observations.",
+            parse_mode='Markdown', reply_markup=MAIN_MENU_KBD
+        )
+        return ConversationHandler.END
+
+    # Use only routine landmarks for collection flow
+    landmarks = db.get_routine_landmarks(user_id)
     if not landmarks: return ConversationHandler.END
     
     context.user_data.update({'landmarks': landmarks, 'current_idx': 0, 'temp_photos': {}, 'temp_status': None})
@@ -555,6 +595,18 @@ async def start_evening_flow(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if update.message:
         if not await ensure_registered(update, context): return ConversationHandler.END
 
+    user_id = update.effective_user.id
+
+    # NEW: Check if routine is already done
+    if is_routine_done(user_id, 'evening'):
+        await update.message.reply_text(
+            "✅ **Evening Summary Recorded**\n"
+            "You have already recorded your summary for today.\n\n"
+            "🎙 **Tip:** Just send a voice note directly if you forgot something.",
+            parse_mode='Markdown', reply_markup=MAIN_MENU_KBD
+        )
+        return ConversationHandler.END
+
     await update.message.reply_text("🎙 **Recording...**\nTap mic to record.", parse_mode='Markdown', reply_markup=ReplyKeyboardRemove())
     return VOICE_RECORD
 
@@ -564,7 +616,13 @@ async def save_voice_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buf = io.BytesIO()
     await f.download_to_memory(buf)
     user = db.get_user_profile(update.effective_user.id)
-    save_telegram_file(buf, user.id, user.farm_name, 0, "daily_summary")
+    
+    # Save to file using utility
+    saved_path = save_telegram_file(buf, user.id, user.farm_name, 0, "daily_summary")
+    
+    # Save to DB (Fix: Ensure evening summaries are logged)
+    # Using save_evening_summary from database.py instead of create_entry with id 0
+    db.save_evening_summary(user.id, saved_path)
     await update.message.reply_text("✅ **Summary Saved.**", parse_mode='Markdown', reply_markup=MAIN_MENU_KBD)
     return ConversationHandler.END
 
@@ -669,13 +727,22 @@ async def handle_adhoc_media(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if update.message.photo:
             f = await update.message.photo[-1].get_file()
             await f.download_to_memory(buf)
-            save_telegram_file(buf, user.id, user.farm_name, 99, "adhoc_photo")
+            saved_paths = {'wide': save_telegram_file(buf, user.id, user.farm_name, 99, "adhoc_photo")}
+            ftype = "Photo"
             await update.message.reply_text("📸 **Snapshot saved.**", reply_markup=MAIN_MENU_KBD)
         elif update.message.voice:
             f = await update.message.voice.get_file()
             await f.download_to_memory(buf)
-            save_telegram_file(buf, user.id, user.farm_name, 99, "adhoc_voice")
+            saved_paths = {'voice_path': save_telegram_file(buf, user.id, user.farm_name, 99, "adhoc_voice")}
+            ftype = "Voice"
             await update.message.reply_text("🎙 **Note saved.**", reply_markup=MAIN_MENU_KBD)
+            
+        # FIX: Log Adhoc to Database
+        # 1. Get/Create Ad-Hoc Landmark
+        lm_id = db.get_or_create_adhoc_landmark(user.id)
+        
+        # 2. Create Entry
+        db.create_entry(user.id, lm_id, saved_paths, f"Ad-Hoc {ftype}", {})
 
 # --- BUILD ---
 if __name__ == '__main__':
