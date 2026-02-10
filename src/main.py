@@ -31,71 +31,49 @@ L_START, CAPTURE_WIDE, CAPTURE_CLOSE, CAPTURE_SOIL, CONFIRM_SET, LOG_STATUS, ADD
 VOICE_RECORD = 13
 EDIT_NAME, EDIT_SCHED_M, EDIT_SCHED_E = range(14, 17)
 VIEW_HISTORY = 17
+ADHOC_WAIT_PHOTO, ADHOC_WAIT_VOICE, ADHOC_WAIT_PHOTO_REVERSE = range(18, 21)
 
 MAIN_MENU_KBD = ReplyKeyboardMarkup([
     ['📸 Start Morning Check-in'],
     ['🎙 Record Evening Summary'],
-    ['📊 View History', '👤 Dashboard'],
-    ['🌦 Check Weather', '❓ Help']
+    ['📝 Quick Ad-Hoc Note'],
+    ['📊 View History', '👤 Dashboard']
 ], resize_keyboard=True)
 
 # --- HELPER: REGISTRATION CHECK ---
 async def ensure_registered(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = db.get_user_profile(update.effective_user.id)
     if not user:
-        await update.message.reply_text(
-            "⚠️ **Unknown User**\nPlease tap /start to register.",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("⚠️ **Unknown User**\nPlease tap /start to register.", parse_mode='Markdown')
         return None
     return user
-
-# --- HELPER: ROUTINE CHECK ---
-def is_routine_done(user_id, routine_type):
-    today = datetime.datetime.now().strftime("%Y-%m-%d")
-    logs = db.get_logs_by_date(user_id, today)
-    logged_ids = [l.get('landmark_id') for l in logs]
-    
-    if routine_type == 'evening':
-        return 0 in logged_ids 
-        
-    if routine_type == 'morning':
-        landmarks = db.get_user_landmarks(user_id)
-        # Filter for IDs 1, 2, 3... (Exclude 0 and 99)
-        morning_logs = [lid for lid in logged_ids if lid not in [0, 99]]
-        return len(set(morning_logs)) >= len(landmarks)
-    
-    return False
 
 # --- SCHEDULER UTILS ---
 async def schedule_user_jobs(application, user_id, p_time_str, v_time_str):
     jq = application.job_queue
     for name in [f"{user_id}_morning", f"{user_id}_evening"]:
         for job in jq.get_jobs_by_name(name): job.schedule_removal()
-    
     try:
         tz = pytz.timezone('Asia/Dubai')
         p_time = datetime.datetime.strptime(p_time_str, "%H:%M").time().replace(tzinfo=tz)
         v_time = datetime.datetime.strptime(v_time_str, "%H:%M").time().replace(tzinfo=tz)
         jq.run_daily(trigger_morning, p_time, chat_id=user_id, name=f"{user_id}_morning")
         jq.run_daily(trigger_evening, v_time, chat_id=user_id, name=f"{user_id}_evening")
-    except ValueError:
-        logger.error(f"Time format error for user {user_id}")
+    except ValueError: pass
 
 async def trigger_morning(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
-    await context.bot.send_message(job.chat_id, "☀️ **Morning Check-in!**\nTime to walk the farm.", reply_markup=MAIN_MENU_KBD, parse_mode='Markdown')
+    await context.bot.send_message(job.chat_id, "☀️ **Morning Check-in!**", reply_markup=MAIN_MENU_KBD, parse_mode='Markdown')
 
 async def trigger_evening(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
-    await context.bot.send_message(job.chat_id, "🌙 **Evening Summary**\nReady to record?", reply_markup=MAIN_MENU_KBD, parse_mode='Markdown')
+    await context.bot.send_message(job.chat_id, "🌙 **Evening Summary**", reply_markup=MAIN_MENU_KBD, parse_mode='Markdown')
 
 async def post_init(application: Application):
     await application.bot.set_my_commands([
-        BotCommand("start", "🏠 Home / Register"),
-        BotCommand("history", "📊 View Entry History"),
-        BotCommand("weather", "🌦 Check Farm Weather"),
-        BotCommand("cancel", "❌ Stop Action")
+        BotCommand("start", "🏠 Home"),
+        BotCommand("history", "📊 History"),
+        BotCommand("cancel", "❌ Stop")
     ])
     for user in db.get_all_users():
         await schedule_user_jobs(application, user.id, user.photo_time, user.voice_time)
@@ -106,7 +84,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user:
         await update.message.reply_text(f"👋 **Welcome back, {user.full_name}!**", reply_markup=MAIN_MENU_KBD, parse_mode='Markdown')
         return ConversationHandler.END
-    await update.message.reply_text("👋 **Welcome.**\nLet's set up your farm profile.\n\nStep 1: What is your **Full Name**?", reply_markup=ReplyKeyboardRemove(), parse_mode='Markdown')
+    await update.message.reply_text("👋 **Welcome.**\nStep 1: **Full Name**?", reply_markup=ReplyKeyboardRemove(), parse_mode='Markdown')
     return NAME
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -115,190 +93,216 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Cancelled.", reply_markup=kb)
     return ConversationHandler.END
 
-# --- PROFILE DASHBOARD ---
+# --- PROFILE ---
 async def view_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and not await ensure_registered(update, context): return ConversationHandler.END
-
-    if update.callback_query:
-        query = update.callback_query
-        await query.answer()
-        user_id = query.from_user.id
-        msg_func = query.edit_message_text
-    else:
-        user_id = update.effective_user.id
-        msg_func = update.message.reply_text
-
+    user_id = update.effective_user.id if update.message else update.callback_query.from_user.id
+    msg_func = update.message.reply_text if update.message else update.callback_query.message.edit_text
+    
     user = db.get_user_profile(user_id)
     landmarks = db.get_user_landmarks(user.id)
     lm_text = "\n".join([f"• {lm.label}: {lm.last_status}" for lm in landmarks])
-
-    msg = (f"👤 **{user.full_name}** | 🌱 {user.farm_name}\n📍 {user.latitude:.4f}, {user.longitude:.4f}\n"
+    msg = (f"👤 **{user.full_name}** | 🌱 {user.farm_name}\n"
            f"⏰ P: {user.photo_time} | V: {user.voice_time}\n📍 **Landmarks:**\n{lm_text}")
     kb = [[InlineKeyboardButton("✏️ Edit Name", callback_data="edit_name"), InlineKeyboardButton("✏️ Edit Schedule", callback_data="edit_sched")]]
     await msg_func(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     return ConversationHandler.END
 
-# --- HISTORY DASHBOARD ---
+# --- HISTORY DASHBOARD (FIXED) ---
 async def view_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Handle entry from Menu Button or Callback
     if update.message:
         if not await ensure_registered(update, context): return ConversationHandler.END
         msg_func = update.message.reply_text
     else:
-        query = update.callback_query
-        await query.answer()
-        msg_func = query.edit_message_text
+        await update.callback_query.answer()
+        msg_func = update.callback_query.edit_message_text
     
     kb = [
         [InlineKeyboardButton("📅 Today", callback_data="hist_today")],
-        [InlineKeyboardButton("📅 Yesterday", callback_data="hist_yesterday")],
-        [InlineKeyboardButton("📅 Last 7 Days", callback_data="hist_week")]
+        [InlineKeyboardButton("📅 Yesterday", callback_data="hist_yesterday")]
     ]
-    await msg_func("📊 **Entry History**\n\nSelect time period:", 
-                   reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    await msg_func("📊 **Select Period:**", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     return VIEW_HISTORY
 
 async def show_history_period(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Shows the summary of completion (Morning/Evening/Adhoc) before showing details.
+    """
     query = update.callback_query
     await query.answer()
-    
     user_id = query.from_user.id
     period = query.data.replace('hist_', '')
     
-    tz = pytz.timezone('Asia/Dubai')
-    today = datetime.datetime.now(tz).date()
+    today = datetime.datetime.now().date()
+    start_date = today if period == 'today' else today - datetime.timedelta(days=1)
+    title = "Today" if period == 'today' else "Yesterday"
     
-    if period == 'today':
-        start_date = end_date = today
-        title = "Today"
-    elif period == 'yesterday':
-        start_date = end_date = today - datetime.timedelta(days=1)
-        title = "Yesterday"
-    else:  # week
-        start_date = today - datetime.timedelta(days=7)
-        end_date = today
-        title = "Last 7 Days"
+    # Get Raw Log Entries
+    entries = db.get_entries_by_date_range(user_id, start_date, start_date).get(start_date.strftime("%Y-%m-%d"), {}).get('entries', [])
     
-    # Fetch RAW entries to avoid KeyError
-    entries_by_date = db.get_entries_by_date_range(user_id, start_date, end_date)
-    
-    if not entries_by_date:
-        await query.edit_message_text(f"📊 **{title}**\n\n_No entries found._", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="back_to_history")]]))
+    if not entries:
+        await query.edit_message_text(f"📭 **{title}**\nNo entries found.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="back_to_history")]]), parse_mode='Markdown')
         return VIEW_HISTORY
+
+    # --- GENERATE SUMMARY ---
+    # 1. Morning Routine Stats
+    total_spots = db.get_user_profile(user_id).landmark_count
+    morning_done = len(set(e['landmark_id'] for e in entries if e['landmark_id'] not in [0, 99]))
+    morning_icon = "✅" if morning_done >= total_spots else f"{morning_done}/{total_spots}"
     
-    message = f"📊 **Entry History - {title}**\n{'='*30}\n\n"
+    # 2. Evening Summary Stats
+    has_evening = any(e['landmark_id'] == 0 for e in entries)
+    evening_icon = "✅" if has_evening else "❌"
+
+    # 3. Ad-Hoc Stats
+    adhoc_count = len([e for e in entries if e['landmark_id'] == 99])
     
-    for date_str, day_data in entries_by_date.items():
-        date_obj = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
-        message += f"📅 **{date_obj.strftime('%b %d')}**\n"
-        
-        # Loop through entries safely
-        for entry in day_data.get('entries', []):
-            # SAFE ACCESS: Use .get() to prevent KeyError
-            lid = entry.get('landmark_id', -1)
-            status = entry.get('status', 'Unknown')
-            name = entry.get('landmark_name', f'Spot {lid}')
-            
-            icon = "⚪"
-            if status == "Healthy": icon = "🟢"
-            elif status == "Issue": icon = "🔴"
-            elif status == "Unsure": icon = "🟠"
-            
-            # Special Icons
-            if lid == 0: 
-                icon = "🌙" # Evening
-                name = "Evening Summary"
-            elif lid == 99: 
-                icon = "📸" # Ad-Hoc
-            
-            note_icon = "📝" if entry.get('has_note') else ""
-            message += f"  {icon} {name}: {status} {note_icon}\n"
-        message += "\n"
-    
-    kb = []
-    for date_str in list(entries_by_date.keys())[:5]:
-        date_obj = datetime.datetime.strptime(date_str, '%Y-%m-%d')
-        kb.append([InlineKeyboardButton(f"📸 View {date_obj.strftime('%b %d')}", callback_data=f"view_date_{date_str}")])
-    
-    kb.append([InlineKeyboardButton("◀️ Back", callback_data="back_to_history")])
-    await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    summary_text = (
+        f"📊 **Overview: {title}**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"☀️ **Morning:** {morning_icon}\n"
+        f"🌙 **Evening:** {evening_icon}\n"
+        f"📝 **Ad-Hoc Notes:** {adhoc_count}\n"
+    )
+
+    date_str = start_date.strftime("%Y-%m-%d")
+    kb = [
+        [InlineKeyboardButton(f"📸 View Photos & Notes", callback_data=f"view_date_{date_str}")],
+        [InlineKeyboardButton("◀️ Back", callback_data="back_to_history")]
+    ]
+    await query.edit_message_text(summary_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     return VIEW_HISTORY
 
 async def show_date_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     user_id = query.from_user.id
     date_str = query.data.replace('view_date_', '')
     entries = db.get_entries_for_date(user_id, date_str)
     
-    if not entries:
-        await query.edit_message_text("No entries found.")
-        return VIEW_HISTORY
+    summary = f"📊 **Detailed Logs** ({date_str})\n" + "━"*15 + "\n"
+    for e in entries:
+        t = e.timestamp.strftime('%H:%M')
+        if e.landmark_id == 0: summary += f"🌙 Evening Summary ({t})\n"
+        elif e.landmark_id == 99: summary += f"⚠️ Ad-Hoc ({t})\n"
+        else: summary += f"{'🟢' if e.status=='Healthy' else '🔴'} {e.landmark.label}: {e.status}\n"
     
-    # 1. Text Summary
-    summary_text = f"📊 **History** ({date_str})\n━━━━━━━━━━━━━━━━\n"
-    for entry in entries:
-        t = entry.timestamp.strftime('%H:%M')
-        if entry.landmark_id == 0:
-             summary_text += f"🌙 **Evening Summary** ({t})\n"
-        elif entry.landmark_id == 99:
-             summary_text += f"⚠️ **Ad-Hoc Capture** ({t})\n"
-        else:
-             icon = "🟢" if entry.status == "Healthy" else "🔴" if entry.status == "Issue" else "🟠" if entry.status == "Unsure" else "⚪"
-             summary_text += f"{icon} **{entry.landmark.label}:** {entry.status}\n"
+    await query.edit_message_text(summary, parse_mode='Markdown')
+    
+    for e in entries:
+        media = []
+        # Photos
+        if e.img_wide and os.path.exists(e.img_wide): media.append(InputMediaPhoto(open(e.img_wide, 'rb'), caption=f"{e.landmark.label} (Wide)"))
+        if e.img_close and os.path.exists(e.img_close): media.append(InputMediaPhoto(open(e.img_close, 'rb'), caption=f"{e.landmark.label} (Close)"))
+        if media: await query.message.reply_media_group(media)
+        # Voice
+        if e.voice_path and os.path.exists(e.voice_path):
+            await query.message.reply_voice(open(e.voice_path, 'rb'), caption=f"🎙 {e.landmark.label}")
 
-    await query.edit_message_text(summary_text, parse_mode='Markdown')
-
-    # 2. Send Media (Photos AND Voice)
-    for entry in entries:
-        media_group = []
-        files_to_close = []
-        
-        # --- PHOTOS ---
-        try:
-            # Ad-Hoc Photo
-            if entry.landmark_id == 99 and getattr(entry, 'img_wide', None) and os.path.exists(entry.img_wide):
-                 fh = open(entry.img_wide, 'rb')
-                 files_to_close.append(fh)
-                 media_group.append(InputMediaPhoto(fh, caption=f"Ad-Hoc ({entry.timestamp.strftime('%H:%M')})"))
-            
-            # Routine Photos (Wide, Close, Soil)
-            elif entry.landmark_id not in [0, 99]:
-                for img_type in ['wide', 'close', 'soil']:
-                    img_path = getattr(entry, f'img_{img_type}', None)
-                    if img_path and os.path.exists(img_path):
-                        fh = open(img_path, 'rb')
-                        files_to_close.append(fh)
-                        caption = f"{entry.landmark.label} - {img_type.capitalize()}" if not media_group else ""
-                        media_group.append(InputMediaPhoto(fh, caption=caption))
-            
-            if media_group:
-                await query.message.reply_media_group(media_group)
-                
-        except Exception as e:
-            logger.error(f"Media error: {e}")
-        finally:
-            for fh in files_to_close: fh.close()
-
-        # --- VOICE NOTES (Evening & Ad-Hoc) ---
-        voice_path = getattr(entry, 'voice_path', None)
-        
-        if voice_path and os.path.exists(voice_path):
-            caption = f"🎙 Note: {entry.landmark.label}"
-            if entry.landmark_id == 0: caption = "🌙 Evening Summary"
-            if entry.landmark_id == 99: caption = "🎙 Ad-Hoc Note"
-            
-            try:
-                with open(voice_path, 'rb') as vf:
-                    await query.message.reply_voice(voice=vf, caption=caption)
-            except Exception as e:
-                logger.error(f"Voice send error: {e}")
-
-    kb = [[InlineKeyboardButton("◀️ Back to History", callback_data="back_to_history")]]
-    await query.message.reply_text("\n\n─────────────────\n\n", reply_markup=InlineKeyboardMarkup(kb))
+    kb = [[InlineKeyboardButton("◀️ Back", callback_data="back_to_history")]]
+    await query.message.reply_text("End of report.", reply_markup=InlineKeyboardMarkup(kb))
     return VIEW_HISTORY
 
-# --- ONBOARDING & EDITING (Standard) ---
+# --- AD-HOC FLOW ---
+async def start_adhoc_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_registered(update, context): return ConversationHandler.END
+    context.user_data['adhoc_buffer'] = {}
+    kb = [[InlineKeyboardButton("⏭ Skip Photo", callback_data="skip_photo")]]
+    await update.message.reply_text("📝 **Ad-Hoc Entry**\n📸 **Step 1:** Send a photo.", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    return ADHOC_WAIT_PHOTO
+
+async def start_adhoc_direct_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_registered(update, context): return ConversationHandler.END
+    context.user_data['adhoc_buffer'] = {}
+    return await process_adhoc_photo(update, context)
+
+async def start_adhoc_direct_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_registered(update, context): return ConversationHandler.END
+    context.user_data['adhoc_buffer'] = {}
+    return await process_adhoc_voice(update, context, is_first_step=True)
+
+async def process_adhoc_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = db.get_user_profile(update.effective_user.id)
+    f = await update.message.photo[-1].get_file()
+    path = await f.download_to_drive(f"data/media/{user.id}_temp_adhoc.jpg")
+    context.user_data['adhoc_buffer']['adhoc_photo'] = path
+    kb = [[InlineKeyboardButton("⏭ Skip Note", callback_data="skip_voice")]]
+    await update.message.reply_text("📸 Saved.\n🎙 **Step 2:** Add a voice note?", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    return ADHOC_WAIT_VOICE
+
+async def skip_adhoc_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    kb = [[InlineKeyboardButton("⏭ Skip Note", callback_data="skip_voice")]]
+    await query.edit_message_text("⏩ Photo skipped.\n🎙 **Step 2:** Record a voice note?", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    return ADHOC_WAIT_VOICE
+
+async def process_adhoc_voice(update: Update, context: ContextTypes.DEFAULT_TYPE, is_first_step=False):
+    f = await update.message.voice.get_file()
+    buf = io.BytesIO()
+    await f.download_to_memory(buf)
+    context.user_data['adhoc_buffer']['voice_data'] = buf
+    
+    if is_first_step:
+        kb = [[InlineKeyboardButton("⏭ Skip Photo", callback_data="skip_photo_reverse")]]
+        await update.message.reply_text("🎙 Note saved.\n📸 **Step 2:** Add a photo?", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        return ADHOC_WAIT_PHOTO_REVERSE
+    else:
+        return await finalize_adhoc(update, context)
+
+async def skip_adhoc_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    return await finalize_adhoc(update, context)
+
+async def process_adhoc_photo_reverse(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = db.get_user_profile(update.effective_user.id)
+    f = await update.message.photo[-1].get_file()
+    path = await f.download_to_drive(f"data/media/{user.id}_temp_adhoc.jpg")
+    context.user_data['adhoc_buffer']['adhoc_photo'] = path
+    return await finalize_adhoc(update, context)
+
+async def skip_photo_reverse(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await finalize_adhoc(update, context)
+
+async def finalize_adhoc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer()
+        msg_func = update.callback_query.edit_message_text
+        user_id = update.callback_query.from_user.id
+    else:
+        msg_func = update.message.reply_text
+        user_id = update.effective_user.id
+        
+    buffer = context.user_data.get('adhoc_buffer', {})
+    if not buffer:
+        await msg_func("❌ Empty entry discarded.")
+        return ConversationHandler.END
+
+    user = db.get_user_profile(user_id)
+    saved_paths = {}
+    
+    if 'adhoc_photo' in buffer:
+        with open(buffer['adhoc_photo'], 'rb') as f:
+            saved_paths['adhoc_photo'] = save_telegram_file(f, user.id, user.farm_name, 99, "adhoc_photo")
+        os.remove(buffer['adhoc_photo'])
+
+    if 'voice_data' in buffer:
+        path = save_telegram_file(buffer['voice_data'], user.id, user.farm_name, 99, "adhoc_voice")
+        saved_paths['adhoc_voice'] = path
+
+    weather = get_weather_data(user.latitude, user.longitude) or {}
+    
+    ftype = []
+    if 'adhoc_photo' in saved_paths: ftype.append("Photo")
+    if 'adhoc_voice' in saved_paths: ftype.append("Note")
+    
+    db.create_entry(user.id, 99, saved_paths, f"Ad-Hoc {' & '.join(ftype)}", weather)
+    await msg_func("✅ **Ad-Hoc Entry Saved.**", parse_mode='Markdown')
+    return ConversationHandler.END
+
+# --- STANDARD HANDLERS ---
 async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['name'] = update.message.text
     await update.message.reply_text("Step 2: **Farm Name**?", parse_mode='Markdown')
@@ -365,13 +369,12 @@ async def edit_sched_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Schedule updated.", reply_markup=MAIN_MENU_KBD)
     return await view_profile(update, context)
 
-# --- COLLECTION FLOW ---
 async def start_collection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and not await ensure_registered(update, context): return ConversationHandler.END
     user_id = update.effective_user.id
-    if is_routine_done(user_id, 'morning'):
-        await update.message.reply_text("✅ **Morning Check-in Complete**\nSend photos directly for **Ad-Hoc**.", parse_mode='Markdown', reply_markup=MAIN_MENU_KBD)
-        return ConversationHandler.END
+    if db.is_routine_done(user_id, 'morning'):
+         await update.message.reply_text("✅ **Done.** Use Ad-Hoc for extras.", reply_markup=MAIN_MENU_KBD)
+         return ConversationHandler.END
     landmarks = db.get_user_landmarks(user_id)
     context.user_data.update({'landmarks': landmarks, 'current_idx': 0, 'temp_photos': {}, 'temp_status': None})
     weather = get_weather_data(db.get_user_profile(user_id).latitude, db.get_user_profile(user_id).longitude)
@@ -440,7 +443,7 @@ async def log_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def prompt_for_voice_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("🎙 **Recording Mode**\n\nTap microphone to record.", parse_mode='Markdown')
+    await query.edit_message_text("🎙 **Recording Mode**\n\nTap microphone to record.\n\n_I'm listening..._", parse_mode='Markdown')
     return ADD_NOTE
 
 async def handle_landmark_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -476,10 +479,9 @@ async def finalize_landmark_entry(update: Update, context: ContextTypes.DEFAULT_
         saved_paths['voice_path'] = v_path
     db.create_entry(user.id, lm.id, saved_paths, status, context.user_data.get('weather', {}))
 
-# --- EVENING ---
 async def start_evening_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and not await ensure_registered(update, context): return ConversationHandler.END
-    if is_routine_done(update.effective_user.id, 'evening'):
+    if db.is_routine_done(update.effective_user.id, 'evening'):
         await update.message.reply_text("✅ **Evening Summary Recorded**", parse_mode='Markdown', reply_markup=MAIN_MENU_KBD)
         return ConversationHandler.END
     await update.message.reply_text("🎙 **Recording...**\nTap mic to record.", parse_mode='Markdown', reply_markup=ReplyKeyboardRemove())
@@ -492,55 +494,9 @@ async def save_voice_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await f.download_to_memory(buf)
     user = db.get_user_profile(update.effective_user.id)
     saved_path = save_telegram_file(buf, user.id, user.farm_name, 0, "daily_summary")
-    
-    # CRITICAL FIX: Explicitly log Landmark 0
     db.create_entry(user.id, 0, {"voice_path": saved_path}, "Summary", {})
-    
     await update.message.reply_text("✅ **Summary Saved.**", parse_mode='Markdown', reply_markup=MAIN_MENU_KBD)
     return ConversationHandler.END
-
-async def check_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = await ensure_registered(update, context)
-    if not user: return
-    loading_msg = await update.message.reply_text("🌦 _Fetching weather..._", parse_mode='Markdown')
-    weather = get_weather_data(user.latitude, user.longitude)
-    await loading_msg.delete()
-    if not weather:
-        await update.message.reply_text("⚠️ Unable to fetch weather.", reply_markup=MAIN_MENU_KBD)
-        return
-    msg = f"🌦 **Weather:** {weather['temp']}°C, {weather['desc']}\n💧 Hum: {weather['humidity']}% | 🌬 Wind: {weather['wind_speed']}m/s"
-    await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=MAIN_MENU_KBD)
-
-# --- ADHOC ---
-async def handle_adhoc_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if text == '📸 Start Morning Check-in': return await start_collection(update, context)
-    if text == '🎙 Record Evening Summary': return await start_evening_flow(update, context)
-    if text == '👤 Dashboard': return await view_profile(update, context)
-    if text == '📊 View History': return await view_history(update, context)
-    if text == '🌦 Check Weather': return await check_weather(update, context)
-    if text == '❓ Help': 
-        await update.message.reply_text("Use menu buttons below.", reply_markup=MAIN_MENU_KBD)
-        return
-    if update.message.photo or update.message.voice:
-        user = await ensure_registered(update, context)
-        if not user: return
-        buf = io.BytesIO()
-        saved_paths = {}
-        ftype = ""
-        if update.message.photo:
-            f = await update.message.photo[-1].get_file()
-            await f.download_to_memory(buf)
-            saved_paths = {'wide': save_telegram_file(buf, user.id, user.farm_name, 99, "adhoc_photo")}
-            ftype = "Photo"
-            await update.message.reply_text("📸 **Snapshot saved.**", reply_markup=MAIN_MENU_KBD)
-        elif update.message.voice:
-            f = await update.message.voice.get_file()
-            await f.download_to_memory(buf)
-            saved_paths = {'voice_path': save_telegram_file(buf, user.id, user.farm_name, 99, "adhoc_voice")}
-            ftype = "Voice"
-            await update.message.reply_text("🎙 **Note saved.**", reply_markup=MAIN_MENU_KBD)
-        db.create_entry(user.id, 99, saved_paths, f"Ad-Hoc {ftype}", {})
 
 if __name__ == '__main__':
     if not TOKEN: exit("No TOKEN")
@@ -584,8 +540,42 @@ if __name__ == '__main__':
     )
     
     history = ConversationHandler(
-        entry_points=[CommandHandler('history', view_history), MessageHandler(filters.Regex("^📊 View History$"), view_history)],
-        states={VIEW_HISTORY: [CallbackQueryHandler(view_history, pattern="^back_to_history$"), CallbackQueryHandler(show_history_period, pattern="^hist_"), CallbackQueryHandler(show_date_details, pattern="^view_date_")]},
+        entry_points=[
+            CommandHandler('history', view_history),
+            MessageHandler(filters.Regex("^📊 View History$"), view_history)
+        ],
+        states={
+            VIEW_HISTORY: [
+                CallbackQueryHandler(view_history, pattern="^back_to_history$"),
+                CallbackQueryHandler(show_history_period, pattern="^hist_"),
+                CallbackQueryHandler(show_date_details, pattern="^view_date_"),
+                # FIX: Handle "View History" button click INSIDE history state
+                MessageHandler(filters.Regex("^📊 View History$"), view_history)
+            ]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    
+    adhoc = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex("^📝 Quick Ad-Hoc Note$"), start_adhoc_menu),
+            MessageHandler(filters.PHOTO, start_adhoc_direct_photo),
+            MessageHandler(filters.VOICE, start_adhoc_direct_voice)
+        ],
+        states={
+            ADHOC_WAIT_PHOTO: [
+                MessageHandler(filters.PHOTO, process_adhoc_photo),
+                CallbackQueryHandler(skip_adhoc_photo, pattern="^skip_photo$")
+            ],
+            ADHOC_WAIT_VOICE: [
+                MessageHandler(filters.VOICE, process_adhoc_voice),
+                CallbackQueryHandler(skip_adhoc_voice, pattern="^skip_voice$")
+            ],
+            ADHOC_WAIT_PHOTO_REVERSE: [
+                 MessageHandler(filters.PHOTO, process_adhoc_photo_reverse),
+                 CallbackQueryHandler(skip_photo_reverse, pattern="^skip_photo_reverse$")
+            ]
+        },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
 
@@ -594,8 +584,7 @@ if __name__ == '__main__':
     app.add_handler(collection)
     app.add_handler(evening)
     app.add_handler(history)
-    app.add_handler(CommandHandler('weather', check_weather))
-    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VOICE, handle_adhoc_media))
+    app.add_handler(adhoc)
     
     print("🤖 Farm Diary Bot LIVE.")
     app.run_polling()
