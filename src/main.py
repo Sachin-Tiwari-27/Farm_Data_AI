@@ -18,6 +18,7 @@ import database as db
 from weather import get_weather_data
 from utils.validators import parse_time
 from utils.files import save_telegram_file
+from utils.transcriber import transcribe_audio
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -280,6 +281,9 @@ async def finalize_adhoc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg_func("❌ Empty entry discarded.")
         return ConversationHandler.END
 
+    # Initialize status message
+    status_msg = await msg_func("⏳ _Processing..._", parse_mode='Markdown')
+
     user = db.get_user_profile(user_id)
     saved_paths = {}
     
@@ -288,18 +292,30 @@ async def finalize_adhoc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             saved_paths['adhoc_photo'] = save_telegram_file(f, user.id, user.farm_name, 99, "adhoc_photo")
         os.remove(buffer['adhoc_photo'])
 
+    text = ""
     if 'voice_data' in buffer:
         path = save_telegram_file(buffer['voice_data'], user.id, user.farm_name, 99, "adhoc_voice")
         saved_paths['adhoc_voice'] = path
+
+        # Transcribe voice
+        await status_msg.edit_text("⏳ _Transcribing voice..._", parse_mode='Markdown')
+        text = transcribe_audio(path)
 
     weather = get_weather_data(user.latitude, user.longitude) or {}
     
     ftype = []
     if 'adhoc_photo' in saved_paths: ftype.append("Photo")
     if 'adhoc_voice' in saved_paths: ftype.append("Note")
+
+    # Create entry
+    db.create_entry(user.id, 99, saved_paths, f"Ad-Hoc {' & '.join(ftype)}", weather, transcription=text)
     
-    db.create_entry(user.id, 99, saved_paths, f"Ad-Hoc {' & '.join(ftype)}", weather)
-    await msg_func("✅ **Ad-Hoc Entry Saved.**", parse_mode='Markdown')
+    result_text = "✅ **Ad-Hoc Entry Saved.**"
+    if text: result_text += f"\n📝 _\"{text}\"_"
+    
+    await status_msg.edit_text(result_text, parse_mode='Markdown')
+    # Re-show menu
+    await context.bot.send_message(chat_id=user_id, text="Menu:", reply_markup=MAIN_MENU_KBD)
     return ConversationHandler.END
 
 # --- STANDARD HANDLERS ---
@@ -347,7 +363,7 @@ async def edit_name_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return EDIT_NAME
 async def edit_name_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = db.get_user_profile(update.effective_user.id)
-    db.save_user_profile({'id': user.id, 'name': update.message.text, 'farm': user.farm_name, 'lat': user.latitude, 'lon': user.longitude, 'p_time': user.photo_time, 'v_time': user.voice_time, 'l_count': user.landmark_count})
+    db.save_user_profile({'id': user.id, 'name': update.message.text, 'farm': user.farm_name, 'lat': user.latitude, 'lon': user.longitude, 'p_time': user._time, 'v_time': user.voice_time, 'l_count': user.landmark_count})
     await update.message.reply_text("✅ Name updated.", reply_markup=MAIN_MENU_KBD)
     return await view_profile(update, context)
 async def edit_sched_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -492,10 +508,21 @@ async def save_voice_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     f = await update.message.voice.get_file()
     buf = io.BytesIO()
     await f.download_to_memory(buf)
+
+    # User Feedback
+    status_msg = await update.message.reply_text("⏳ _Processing..._", parse_mode='Markdown')
+    
     user = db.get_user_profile(update.effective_user.id)
     saved_path = save_telegram_file(buf, user.id, user.farm_name, 0, "daily_summary")
-    db.create_entry(user.id, 0, {"voice_path": saved_path}, "Summary", {})
-    await update.message.reply_text("✅ **Summary Saved.**", parse_mode='Markdown', reply_markup=MAIN_MENU_KBD)
+
+    await status_msg.edit_text("⏳ _Transcribing..._", parse_mode='Markdown')
+    text = await transcribe_audio(saved_path)
+
+    db.create_entry(user.id, 0, {"voice_path": saved_path}, "Summary", {}, transcription=text)
+    
+    await status_msg.edit_text("✅ **Summary Saved.**", parse_mode='Markdown')
+    # Re-show menu
+    await update.message.reply_text("Menu:", reply_markup=MAIN_MENU_KBD)
     return ConversationHandler.END
 
 if __name__ == '__main__':

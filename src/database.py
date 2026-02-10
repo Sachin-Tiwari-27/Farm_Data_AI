@@ -2,8 +2,8 @@ import json
 import os
 from datetime import datetime
 
-DB_FILE = "data/users.json"
-LOGS_FILE = "data/logs.json"
+DB_FILE = "data/db/users.json"
+LOGS_FILE = "data/db/logs.json"
 
 # --- DATA CLASSES ---
 class User:
@@ -31,6 +31,7 @@ class LogEntry:
         self.timestamp = datetime.fromisoformat(data.get('timestamp'))
         self.files = data.get('files', {})
         self.has_note = data.get('has_note', False)
+        self.transcription = data.get('transcription', "")
         
         # Helpers
         self.img_wide = self.files.get('wide') or self.files.get('adhoc_photo')
@@ -88,7 +89,7 @@ def get_user_landmarks(user_id):
     return landmarks
 
 # --- LOGGING FUNCTIONS ---
-def create_entry(user_id, landmark_id, file_paths, status, weather):
+def create_entry(user_id, landmark_id, file_paths, status, weather, transcription=""):
     name = f"Spot {landmark_id}"
     if landmark_id == 0: name = "Evening Summary"
     if landmark_id == 99: name = "Ad-Hoc"
@@ -100,6 +101,7 @@ def create_entry(user_id, landmark_id, file_paths, status, weather):
         "files": file_paths,
         "status": status,
         "weather": weather,
+        "transcription": transcription,
         "timestamp": datetime.now().isoformat(),
         "date": datetime.now().strftime("%Y-%m-%d"),
         "has_note": True if file_paths.get('voice_path') or file_paths.get('adhoc_voice') else False
