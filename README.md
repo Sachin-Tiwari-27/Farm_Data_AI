@@ -47,13 +47,14 @@ A Telegram bot designed to be a digital assistant for farmers, automating daily 
 3.  **Install Dependencies:**
 
     ```bash
-    pip install -r requirement.txt
+    pip install -r requirements.txt
     ```
 
 4.  **Configuration:**
     Create a `.env` file in the root directory:
     ```env
     TELEGRAM_TOKEN=your_telegram_bot_token_here
+    AGRO_API_KEY=your_agromonitoring_api_key_here
     ```
 
 ## Usage 💡
@@ -71,10 +72,6 @@ A Telegram bot designed to be a digital assistant for farmers, automating daily 
     - `/profile` - View dashboard and edit settings.
     - `/cancel` - Stop the current action.
 
-    **Debug Tools:**
-    - `/jobs` - View upcoming scheduled reminders.
-    - `/time` - Check the bot's current server time.
-
 ## Project Structure 📂
 
 - `src/`
@@ -83,7 +80,7 @@ A Telegram bot designed to be a digital assistant for farmers, automating daily 
   - `weather.py`: Fetching weather data.
   - `utils/`: Helper functions for file management and validation.
 - `data/`: Storage for photos, voice notes, and the database.
-- `requirement.txt`: Project dependencies.
+- `requirements.txt`: Project dependencies.
 
 ## License 📄
 

@@ -571,7 +571,69 @@ async def save_voice_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- WEATHER CHECK ---
 async def check_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Display current weather and forecast for the farm"""
+    user = await ensure_registered(update, context)
+    if not user: return
     
+    # Show loading message
+    loading_msg = await update.message.reply_text("🌦 _Fetching weather data..._", parse_mode='Markdown')
+    
+    # Get weather
+    weather = get_weather_data(user.latitude, user.longitude)
+    
+    await loading_msg.delete()
+    
+    if not weather:
+        await update.message.reply_text(
+            "⚠️ Unable to fetch weather data at the moment.\nPlease try again later.",
+            reply_markup=MAIN_MENU_KBD
+        )
+        return
+    
+    # Format detailed weather message
+    msg = "🌦 **Farm Weather Report**\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    # Current conditions
+    msg += f"🌡️ **Temperature:** {weather['temp']}°C\n"
+    msg += f"   └ Feels like: {weather['temp_min']}°C - {weather['temp_max']}°C\n\n"
+    
+    msg += f"☁️ **Condition:** {weather['desc'].capitalize()}\n\n"
+    
+    msg += f"💧 **Humidity:** {weather['humidity']}%\n"
+    msg += f"🌬️ **Wind:** {weather['wind_speed']} m/s"
+    
+    if weather.get('wind_deg'):
+        # Convert wind degree to direction
+        directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+        idx = round(weather['wind_deg'] / 45) % 8
+        msg += f" ({directions[idx]})"
+    
+    msg += f"\n🔽 **Pressure:** {weather['pressure']} hPa\n\n"
+    
+    # Forecast
+    if weather.get('forecast_temp'):
+        msg += f"📅 **Next Forecast:** {weather['forecast_temp']}°C\n\n"
+    
+    # Farming tips based on conditions
+    msg += "🌾 **Farm Tips:**\n"
+    
+    if weather['temp'] > 35:
+        msg += "• ⚠️ High heat - ensure adequate irrigation\n"
+    elif weather['temp'] < 10:
+        msg += "• ⚠️ Cold weather - protect sensitive crops\n"
+    
+    if weather['humidity'] > 80:
+        msg += "• 💧 High humidity - watch for fungal issues\n"
+    elif weather['humidity'] < 30:
+        msg += "• 🌵 Low humidity - increase watering\n"
+    
+    if weather['wind_speed'] > 10:
+        msg += "• 🌬️ Strong winds - check plant supports\n"
+    
+    if not any([weather['temp'] > 35, weather['temp'] < 10, weather['humidity'] > 80, weather['humidity'] < 30, weather['wind_speed'] > 10]):
+        msg += "• ✅ Good conditions for farming!\n"
+    
+    await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=MAIN_MENU_KBD)
 
 # --- ADHOC ---
 async def handle_adhoc_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
