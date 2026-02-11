@@ -6,7 +6,34 @@ from datetime import datetime
 DB_FILE = "data/db/users.json"
 LOGS_FILE = "data/db/logs.json"
 
+# --- CONSTANTS: FARM ATTRIBUTES ---
+ENV_FIELD = "Open Field"
+ENV_POLY = "Polyhouse"
+ENV_CEA = "Controlled Env (CEA)"
+
+MED_SOIL = "Soil"
+MED_COCO = "Cocopeat"
+MED_MIX = "Soil + Cocopeat"
+MED_HYDRO = "Hydroponic"
+MED_OTHER = "Other"
+
 # --- DATA CLASSES ---
+class Landmark:
+    def __init__(self, data):
+        self.id = data.get('id')
+        self.label = data.get('label', f"Spot {self.id}")
+        self.env = data.get('env', ENV_FIELD)
+        self.medium = data.get('medium', MED_SOIL)
+        self.last_status = data.get('last_status', "Pending") # Populated dynamically later
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "label": self.label,
+            "env": self.env,
+            "medium": self.medium
+        }
+
 class User:
     def __init__(self, data):
         self.id = data.get('id')
@@ -16,16 +43,14 @@ class User:
         self.longitude = data.get('lon')
         self.photo_time = data.get('p_time')
         self.voice_time = data.get('v_time')
-        self.landmark_count = data.get('l_count')
-
-class Landmark:
-    def __init__(self, id, label, status="Pending"):
-        self.id = id
-        self.label = label
-        self.last_status = status
+        
+        # NEW: Parse list of dictionaries into Landmark objects
+        lm_data = data.get('landmarks', [])
+        self.landmarks = [Landmark(lm) for lm in lm_data]
 
 class LogEntry:
     def __init__(self, data):
+        self.id = data.get('id')
         self.user_id = data.get('user_id')
         self.landmark_id = data.get('landmark_id')
         self.status = data.get('status')
@@ -34,20 +59,19 @@ class LogEntry:
         self.has_note = data.get('has_note', False)
         self.transcription = data.get('transcription', "")
         
+        # NEW: Environment snapshot
+        self.landmark_context = data.get('landmark_context', {})
+        self.landmark_name = data.get('landmark_name', f"Spot {self.landmark_id}")
+        
         # Helpers
         self.img_wide = self.files.get('wide') or self.files.get('adhoc_photo')
         self.img_close = self.files.get('close')
         self.img_soil = self.files.get('soil')
         self.voice_path = self.files.get('voice_path') or self.files.get('adhoc_voice')
 
-        label = data.get('landmark_name', f"Spot {self.landmark_id}")
-        if self.landmark_id == 0: label = "Evening Summary"
-        if self.landmark_id == 99: label = "Ad-Hoc"
-        self.landmark = Landmark(self.landmark_id, label, self.status)
-
 # --- INIT ---
 def init_db():
-    os.makedirs("data", exist_ok=True)
+    os.makedirs("data/db", exist_ok=True)
     if not os.path.exists(DB_FILE):
         with open(DB_FILE, 'w') as f: json.dump({}, f)
     if not os.path.exists(LOGS_FILE):
@@ -63,6 +87,7 @@ def get_user_profile(user_id):
     return User(u_data) if u_data else None
 
 def save_user_profile(user_data):
+    """Expects user_data to have a 'landmarks' list of dicts"""
     with open(DB_FILE, 'r') as f:
         data = json.load(f)
     data[str(user_data['id'])] = user_data
@@ -75,26 +100,42 @@ def get_all_users():
     return [User(u) for u in data.values()]
 
 # --- LANDMARK FUNCTIONS ---
-def get_routine_landmarks(user_id):
+def get_user_landmarks(user_id):
+    """Returns rich Landmark objects with their latest status attached."""
     user = get_user_profile(user_id)
     if not user: return []
-    return [Landmark(i, f"Spot {i}") for i in range(1, user.landmark_count + 1)]
-
-def get_user_landmarks(user_id):
-    landmarks = get_routine_landmarks(user_id)
+    
+    landmarks = user.landmarks
     today = datetime.now().strftime("%Y-%m-%d")
     logs = get_logs_by_date(user_id, today)
-    status_map = {l['landmark_id']: l['status'] for l in logs}
+    status_map = {l.get('landmark_id'): l.get('status') for l in logs}
+    
     for lm in landmarks:
         lm.last_status = status_map.get(lm.id, "Pending")
     return landmarks
 
+def get_landmark_by_id(user_id, landmark_id):
+    user = get_user_profile(user_id)
+    if not user: return None
+    for lm in user.landmarks:
+        if lm.id == landmark_id: return lm
+    return None
+
 # --- LOGGING FUNCTIONS ---
 def create_entry(user_id, landmark_id, file_paths, status, weather, transcription=""):
     name = f"Spot {landmark_id}"
+    context_snapshot = {}
+    
+    # 1. Look up rich details if it's a specific spot
+    if landmark_id not in [0, 99]:
+        lm = get_landmark_by_id(user_id, landmark_id)
+        if lm:
+            name = lm.label
+            context_snapshot = {"env": lm.env, "medium": lm.medium}
+            
     if landmark_id == 0: name = "Evening Summary"
     if landmark_id == 99: name = "Ad-Hoc"
-
+    
     entry_id = str(uuid.uuid4())
 
     entry = {
@@ -102,6 +143,7 @@ def create_entry(user_id, landmark_id, file_paths, status, weather, transcriptio
         "user_id": user_id,
         "landmark_id": landmark_id,
         "landmark_name": name,
+        "landmark_context": context_snapshot, # NEW: Save the snapshot
         "files": file_paths,
         "status": status,
         "weather": weather,
@@ -119,6 +161,19 @@ def create_entry(user_id, landmark_id, file_paths, status, weather, transcriptio
     
     return entry_id
 
+def update_transcription(entry_id, text):
+    with open(LOGS_FILE, 'r') as f:
+        logs = json.load(f)
+    found = False
+    for entry in logs:
+        if entry.get('id') == entry_id:
+            entry['transcription'] = text
+            found = True
+            break
+    if found:
+        with open(LOGS_FILE, 'w') as f:
+            json.dump(logs, f, indent=4)
+
 # --- HISTORY & CHECKS ---
 def get_logs_by_date(user_id, date_str):
     with open(LOGS_FILE, 'r') as f:
@@ -126,9 +181,6 @@ def get_logs_by_date(user_id, date_str):
     return [l for l in logs if str(l.get('user_id')) == str(user_id) and l.get('date') == date_str]
 
 def is_routine_done(user_id, routine_type):
-    """
-    Checks if Morning (all spots) or Evening (summary) is done today.
-    """
     today = datetime.now().strftime("%Y-%m-%d")
     logs = get_logs_by_date(user_id, today)
     logged_ids = [l.get('landmark_id') for l in logs]
@@ -137,11 +189,9 @@ def is_routine_done(user_id, routine_type):
         return 0 in logged_ids 
         
     if routine_type == 'morning':
-        landmarks = get_routine_landmarks(user_id)
-        # Filter for Routine IDs (1..N) excluding 0 and 99
+        landmarks = get_user_landmarks(user_id)
         morning_logs = [lid for lid in logged_ids if lid not in [0, 99]]
         return len(set(morning_logs)) >= len(landmarks)
-    
     return False
 
 def get_entries_by_date_range(user_id, start_date, end_date):
@@ -167,15 +217,3 @@ def get_entries_by_date_range(user_id, start_date, end_date):
 def get_entries_for_date(user_id, date_str):
     raw_logs = get_logs_by_date(user_id, date_str)
     return [LogEntry(l) for l in raw_logs]
-
-def update_transcription(entry_id, text):
-    with open(LOGS_FILE, 'r') as f:
-        logs = json.load(f)
-    
-    for entry in logs:
-        if entry.get('id') == entry_id:
-            entry['transcription'] = text
-            break
-            
-    with open(LOGS_FILE, 'w') as f:
-        json.dump(logs, f, indent=4)
