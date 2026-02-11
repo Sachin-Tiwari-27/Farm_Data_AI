@@ -1,5 +1,6 @@
 import json
 import os
+import uuid
 from datetime import datetime
 
 DB_FILE = "data/db/users.json"
@@ -94,7 +95,10 @@ def create_entry(user_id, landmark_id, file_paths, status, weather, transcriptio
     if landmark_id == 0: name = "Evening Summary"
     if landmark_id == 99: name = "Ad-Hoc"
 
+    entry_id = str(uuid.uuid4())
+
     entry = {
+        "id": entry_id,
         "user_id": user_id,
         "landmark_id": landmark_id,
         "landmark_name": name,
@@ -112,6 +116,8 @@ def create_entry(user_id, landmark_id, file_paths, status, weather, transcriptio
     logs.append(entry)
     with open(LOGS_FILE, 'w') as f:
         json.dump(logs, f, indent=4)
+    
+    return entry_id
 
 # --- HISTORY & CHECKS ---
 def get_logs_by_date(user_id, date_str):
@@ -161,3 +167,15 @@ def get_entries_by_date_range(user_id, start_date, end_date):
 def get_entries_for_date(user_id, date_str):
     raw_logs = get_logs_by_date(user_id, date_str)
     return [LogEntry(l) for l in raw_logs]
+
+def update_transcription(entry_id, text):
+    with open(LOGS_FILE, 'r') as f:
+        logs = json.load(f)
+    
+    for entry in logs:
+        if entry.get('id') == entry_id:
+            entry['transcription'] = text
+            break
+            
+    with open(LOGS_FILE, 'w') as f:
+        json.dump(logs, f, indent=4)

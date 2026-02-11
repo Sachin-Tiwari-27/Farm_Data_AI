@@ -3,6 +3,7 @@ import logging
 import datetime
 import io
 import pytz
+import asyncio
 from dotenv import load_dotenv
 
 from telegram import (
@@ -40,6 +41,24 @@ MAIN_MENU_KBD = ReplyKeyboardMarkup([
     ['📝 Quick Ad-Hoc Note'],
     ['📊 View History', '👤 Dashboard']
 ], resize_keyboard=True)
+
+# --- BACKGROUND WORKER ---
+async def run_transcription_bg(file_path, entry_id):
+    """Runs Whisper in a separate thread so it doesn't block the bot."""
+    if not file_path or not os.path.exists(file_path): return
+
+    logger.info(f"🧵 Starting BG Transcription for {entry_id}...")
+    try:
+        # Run synchronous function in a thread
+        loop = asyncio.get_running_loop()
+        text = await loop.run_in_executor(None, transcribe_audio, file_path)
+        
+        # Update DB
+        if text:
+            db.update_transcription(entry_id, text)
+            logger.info(f"✅ BG Transcription done: {text[:20]}...")
+    except Exception as e:
+        logger.error(f"❌ BG Error: {e}")
 
 # --- HELPER: REGISTRATION CHECK ---
 async def ensure_registered(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -268,6 +287,7 @@ async def skip_photo_reverse(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return await finalize_adhoc(update, context)
 
 async def finalize_adhoc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Determine callback or direct message
     if update.callback_query:
         await update.callback_query.answer()
         msg_func = update.callback_query.edit_message_text
@@ -281,41 +301,37 @@ async def finalize_adhoc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg_func("❌ Empty entry discarded.")
         return ConversationHandler.END
 
-    # Initialize status message
-    status_msg = await msg_func("⏳ _Processing..._", parse_mode='Markdown')
-
     user = db.get_user_profile(user_id)
     saved_paths = {}
     
+    # Save Photo
     if 'adhoc_photo' in buffer:
         with open(buffer['adhoc_photo'], 'rb') as f:
             saved_paths['adhoc_photo'] = save_telegram_file(f, user.id, user.farm_name, 99, "adhoc_photo")
         os.remove(buffer['adhoc_photo'])
 
-    text = ""
+    # Save Voice
+    voice_path_for_bg = None
     if 'voice_data' in buffer:
         path = save_telegram_file(buffer['voice_data'], user.id, user.farm_name, 99, "adhoc_voice")
         saved_paths['adhoc_voice'] = path
-
-        # Transcribe voice
-        await status_msg.edit_text("⏳ _Transcribing voice..._", parse_mode='Markdown')
-        text = transcribe_audio(path)
+        voice_path_for_bg = path
 
     weather = get_weather_data(user.latitude, user.longitude) or {}
     
     ftype = []
     if 'adhoc_photo' in saved_paths: ftype.append("Photo")
     if 'adhoc_voice' in saved_paths: ftype.append("Note")
-
-    # Create entry
-    db.create_entry(user.id, 99, saved_paths, f"Ad-Hoc {' & '.join(ftype)}", weather, transcription=text)
     
-    result_text = "✅ **Ad-Hoc Entry Saved.**"
-    if text: result_text += f"\n📝 _\"{text}\"_"
+    # 1. Create DB Entry with Pending status
+    transcription_status = "⏳ Transcribing..." if voice_path_for_bg else ""
+    entry_id = db.create_entry(user.id, 99, saved_paths, f"Ad-Hoc {' & '.join(ftype)}", weather, transcription=transcription_status)
     
-    await status_msg.edit_text(result_text, parse_mode='Markdown')
-    # Re-show menu
-    await context.bot.send_message(chat_id=user_id, text="Menu:", reply_markup=MAIN_MENU_KBD)
+    # 2. Fire Background Task (NON-BLOCKING)
+    if voice_path_for_bg:
+        context.application.create_task(run_transcription_bg(voice_path_for_bg, entry_id))
+    
+    await msg_func("✅ **Ad-Hoc Saved.**", parse_mode='Markdown')
     return ConversationHandler.END
 
 # --- STANDARD HANDLERS ---
@@ -487,13 +503,27 @@ async def finalize_landmark_entry(update: Update, context: ContextTypes.DEFAULT_
     lm = context.user_data['landmarks'][context.user_data['current_idx']]
     status = context.user_data['temp_status']
     saved_paths = {}
-    for k, p in context.user_data['temp_photos'].items():
-        with open(p, 'rb') as f: saved_paths[k] = save_telegram_file(f, user.id, user.farm_name, lm.id, k)
-        if os.path.exists(p): os.remove(p)
+    for k, p in context.user_data.get('temp_photos', {}).items():
+        if os.path.exists(p):
+            with open(p, 'rb') as f: saved_paths[k] = save_telegram_file(f, user.id, user.farm_name, lm.id, k)
+            os.remove(p)
     if voice_file:
         v_path = save_telegram_file(voice_file, user.id, user.farm_name, lm.id, "issue_note")
         saved_paths['voice_path'] = v_path
-    db.create_entry(user.id, lm.id, saved_paths, status, context.user_data.get('weather', {}))
+        voice_path_for_bg = v_path
+        transcription_status = "⏳ Transcribing..."
+    else:
+        voice_path_for_bg = None
+        transcription_status = ""
+
+    # 1. Create DB Entry with Pending status
+    entry_id = db.create_entry(user.id, lm.id, saved_paths, status, context.user_data.get('weather', {}), transcription=transcription_status)
+    
+    # 2. Fire Background Task (NON-BLOCKING)
+    if voice_path_for_bg:
+        context.application.create_task(run_transcription_bg(voice_path_for_bg, entry_id))
+
+
 
 async def start_evening_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and not await ensure_registered(update, context): return ConversationHandler.END
@@ -508,21 +538,19 @@ async def save_voice_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     f = await update.message.voice.get_file()
     buf = io.BytesIO()
     await f.download_to_memory(buf)
-
-    # User Feedback
+    
     status_msg = await update.message.reply_text("⏳ _Processing..._", parse_mode='Markdown')
     
     user = db.get_user_profile(update.effective_user.id)
     saved_path = save_telegram_file(buf, user.id, user.farm_name, 0, "daily_summary")
-
-    await status_msg.edit_text("⏳ _Transcribing..._", parse_mode='Markdown')
-    text = await transcribe_audio(saved_path)
-
-    db.create_entry(user.id, 0, {"voice_path": saved_path}, "Summary", {}, transcription=text)
     
-    await status_msg.edit_text("✅ **Summary Saved.**", parse_mode='Markdown')
-    # Re-show menu
-    await update.message.reply_text("Menu:", reply_markup=MAIN_MENU_KBD)
+    # 1. Save Pending
+    entry_id = db.create_entry(user.id, 0, {"voice_path": saved_path}, "Summary", {}, transcription="⏳ Transcribing...")
+    
+    # 2. Fire BG
+    context.application.create_task(run_transcription_bg(saved_path, entry_id))
+    
+    await update.message.reply_text("✅ **Summary Saved.**", reply_markup=MAIN_MENU_KBD)
     return ConversationHandler.END
 
 if __name__ == '__main__':
