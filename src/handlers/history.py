@@ -7,10 +7,26 @@ from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, Mess
 import database as db
 from handlers.router import route_intent
 
+# --- STATES ---
 VIEW_HISTORY, BROWSE_DATES = range(2)
-ITEMS_PER_PAGE = 6 # 6 items = 3 rows of 2
+ITEMS_PER_PAGE = 6 
 
 async def view_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = db.get_user_profile(user_id)
+    if not user:
+        if update.message:
+            await update.message.reply_text(
+                "⚠️ **Registration Required**\n\n"
+                "I don't see your farm profile yet.\n"
+                "Please tap /start to set up your farm.",
+                parse_mode='Markdown'
+            )
+        return ConversationHandler.END
+
+    # Entry point cleaning
+    context.user_data.clear()
+
     if update.message: msg_func = update.message.reply_text
     else: 
         await update.callback_query.answer()
@@ -71,11 +87,12 @@ async def show_single_day_summary(update, context, data_key):
     # Check Morning Status (Source of Truth)
     pending = db.get_pending_landmark_ids(user_id)
     am_status = "✅ Done" if not pending else f"⚠️ {len(pending)} Pending"
+    if 'yesterday' in data_key: am_status = "n/a" # Only relevant for today
     
     summary = (f"📊 **{title}**\n"
                f"☀️ Morning: {am_status}\n"
                f"🌙 Evening: {'✅ Done' if evening_done else '❌ Pending'}\n"
-               f"━━━━━━━━━━━━\n" + ("\n".join(lines) if lines else "_No routine spots logs._"))
+               f"━━━━━━━━━━━━\n" + ("\n".join(lines) if lines else "_No routine logs._"))
                
     if adhoc_count: summary += f"\n\n📝 Ad-Hoc Notes: {adhoc_count}"
     
@@ -86,7 +103,7 @@ async def show_single_day_summary(update, context, data_key):
     await query.edit_message_text(summary, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     return VIEW_HISTORY
 
-# --- DATE GRID (New) ---
+# --- DATE GRID ---
 
 async def show_date_grid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -95,11 +112,9 @@ async def show_date_grid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     days = context.user_data.get('hist_days', 7)
     page = context.user_data.get('hist_page', 0)
     
-    # 1. Get List of Dates with Data
     end_date = datetime.datetime.now().date()
     start_date = end_date - datetime.timedelta(days=days)
     
-    # We fetch ALL data for range to see which dates exist
     data_map = db.get_entries_by_date_range(user_id, start_date, end_date)
     available_dates = sorted(data_map.keys(), reverse=True)
     
@@ -107,18 +122,15 @@ async def show_date_grid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("📭 No logs in this period.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="back_main")]]))
         return VIEW_HISTORY
 
-    # 2. Paginate
     total_pages = math.ceil(len(available_dates) / ITEMS_PER_PAGE)
     if page >= total_pages: page = 0
     
     start = page * ITEMS_PER_PAGE
     subset = available_dates[start : start+ITEMS_PER_PAGE]
     
-    # 3. Build Grid
     kb = []
     row = []
     for d_str in subset:
-        # Format: "Feb 12"
         d_obj = datetime.datetime.strptime(d_str, "%Y-%m-%d")
         lbl = d_obj.strftime("%b %d")
         row.append(InlineKeyboardButton(lbl, callback_data=f"view_date_{d_str}"))
@@ -127,7 +139,6 @@ async def show_date_grid(update: Update, context: ContextTypes.DEFAULT_TYPE):
             row = []
     if row: kb.append(row)
     
-    # Nav Buttons
     nav = []
     if page > 0: nav.append(InlineKeyboardButton("⬅️", callback_data=f"hpage_{page-1}"))
     if total_pages > 1: nav.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="noop"))
@@ -150,16 +161,11 @@ async def handle_grid_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_date_grid(update, context)
     
     if data.startswith("view_date_"):
-        # Reuse existing detail view, but return to GRID state? 
-        # Actually simplest to treat detail view as terminal or give back button to grid.
-        # For simplicity, back button goes to main history menu in current helper.
-        # Let's override context so "Back" works smartly? 
-        # Implementing simple detail view here:
         return await show_date_details(update, context)
         
     return BROWSE_DATES
 
-# --- DETAIL VIEW (Reused) ---
+# --- DETAIL VIEW ---
 async def show_date_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -180,11 +186,9 @@ async def show_date_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Media
     for e in entries:
         media = []
-        # Support new List-based photos
         if hasattr(e, 'photos') and e.photos:
             for p in e.photos:
                 if os.path.exists(p): media.append(InputMediaPhoto(open(p, 'rb')))
-        # Fallback for old style
         elif e.files:
             for k, v in e.files.items():
                 if 'photo' in k and os.path.exists(v): media.append(InputMediaPhoto(open(v, 'rb')))
@@ -193,7 +197,7 @@ async def show_date_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     kb = [[InlineKeyboardButton("◀️ Back to Menu", callback_data="back_main")]]
     await query.message.reply_text("End of Log.", reply_markup=InlineKeyboardMarkup(kb))
-    return VIEW_HISTORY # Reset to main state
+    return VIEW_HISTORY
 
 # --- EXPORT ---
 history_handler = ConversationHandler(
@@ -212,5 +216,10 @@ history_handler = ConversationHandler(
             CallbackQueryHandler(handle_grid_nav, pattern="^(hpage_|back_main|view_date_)")
         ]
     },
-    fallbacks=[CommandHandler('cancel', view_history), MessageHandler(filters.TEXT & ~filters.COMMAND, route_intent)]
+    fallbacks=[
+        CommandHandler('cancel', view_history),
+        # SILENT KILLER SWITCH
+        MessageHandler(filters.TEXT, route_intent)
+    ],
+    
 )

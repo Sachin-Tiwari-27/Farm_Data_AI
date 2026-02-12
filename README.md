@@ -1,85 +1,95 @@
 # Farm AI Assistant 🌾
 
-A Telegram bot designed to be a digital assistant for farmers, automating daily check-ins, tracking crop health, and logging voice summaries.
+A professional Telegram bot assistant for farmers, automating daily check-ins, tracking crop health, and logging voice summaries with a premium, menu-driven interface.
 
 ## Features ✨
 
 ### 🌿 Daily Routine
 
-- **Morning Check-in (`/collection`)**: Guided process to capture photos of specific landmarks (Wide shot, Close-up, Soil/Base).
-- **Evening Summary (`/record`)**: Record a voice note to summarize the day's events.
-- **Smart Scheduling**: Automatically schedules daily reminders based on your preferred times.
-- **Timezone Aware**: Operates in your local timezone (Default: `Asia/Dubai`).
+- **Morning Check-in** (📸): Guided 3-photo flow for specific landmarks:
+  1. **Wide Shot** (Overall view)
+  2. **Close-up** (Plant health)
+  3. **Soil/Base** (Moisture/Environment)
+  - Followed by **Status Assessment** (Healthy, Issue, Unsure) and optional **Voice Note**.
+- **Evening Summary** (🎙): Quick voice recording for daily farm-level observations. No tagging required.
+- **Smart Gatekeeper**: Automatically detects unregistered users and prompts for setup.
 
 ### 📸 Effortless Logging
 
-- **Ad-hoc Captures**: Simply send a **Photo** or **Voice Note** to the bot at any time to save a quick snapshot or thought.
-- **Landmark Tracking**: Monitor specific spots on your farm over time.
-- **Status Logging**: Tag check-ins as Healthy, Issue/Pest, or Unsure.
+- **Smart Ad-hoc Capture**: Send any **Photo** or **Voice Note** instantly.
+  - **"Add More" Feedback**: Group multiple photos and notes together with real-time counting.
+  - **Tagging**: Link ad-hoc entries to specific landmarks or save as general notes.
+- **Automated Transcription**: Background voice-to-text processing for all voice notes.
 
-### ⚙️ Profile Management (`/profile`)
+### ⚙️ Farm Management
 
-- **Dashboard**: View your farm details and current schedule.
-- **Edit on the Fly**: Update your Name or Daily Schedule directly from the dashboard.
-- **Weather Integration**: Real-time weather updates during check-ins.
+- **Interactive Dashboard**: View farm profile and manage landmarks (Add/Rename/Delete).
+- **History & Reports**: Browse logs by date (Today, Yesterday, Last 7 Days, Last Month).
+- **Weather Integration**: Dynamic weather data capture during every check-in.
+- **Persistent Menu**: A robust custom keyboard that stays available for easy navigation.
 
 ## Requirements 📋
 
-- Python 3.8+
+- Python 3.12+
 - Telegram Bot Token ([@BotFather](https://t.me/BotFather))
+- Agromonitoring API Key
 
 ## Installation 🚀
 
-1.  **Clone the repository:**
+1. **Clone the repository:**
 
-    ```bash
-    git clone <repository_url>
-    cd Farm_AI_Assistant
-    ```
+   ```bash
+   git clone <repository_url>
+   cd Farm_AI_Assistant
+   ```
 
-2.  **Set up Virtual Environment:**
+2. **Set up Virtual Environment:**
 
-    ```bash
-    python -m venv venv
-    source venv/bin/activate  # Windows: venv\Scripts\activate
-    ```
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # Windows: venv\\Scripts\\activate
+   ```
 
-3.  **Install Dependencies:**
+3. **Install Dependencies:**
 
-    ```bash
-    pip install -r requirements.txt
-    ```
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-4.  **Configuration:**
-    Create a `.env` file in the root directory:
-    ```env
-    TELEGRAM_TOKEN=your_telegram_bot_token_here
-    AGRO_API_KEY=your_agromonitoring_api_key_here
-    ```
+4. **Configuration:**
+   Create a `.env` file in the root directory:
+   ```env
+   TELEGRAM_TOKEN=your_telegram_bot_token_here
+   AGRO_API_KEY=your_agromonitoring_api_key_here
+   ```
 
 ## Usage 💡
 
-1.  **Start the Bot:**
+1. **Start the Bot:**
 
-    ```bash
-    python src/main.py
-    ```
+   ```bash
+   python src/main.py
+   ```
 
-2.  **Commands:**
-    - `/start` - Register your farm and set up your profile.
-    - `/collection` - Start the morning photo check-in.
-    - `/record` - Record an evening voice summary.
-    - `/profile` - View dashboard and edit settings.
-    - `/cancel` - Stop the current action.
+2. **Core Workflow:**
+   - Use `/start` for the first-time guided onboarding.
+   - Interact via the **Main Menu Keyboard**:
+     - 📸 **Start Morning Check-in**
+     - 🎙 **Record Evening Summary**
+     - 📝 **Quick Ad-Hoc Note**
+     - 📊 **View History**
+     - 👤 **Dashboard**
 
 ## Project Structure 📂
 
 - `src/`
-  - `main.py`: Core bot logic, scheduling, and conversation handlers.
-  - `database.py`: SQLite database management (Users, Landmarks, Logs).
-  - `weather.py`: Fetching weather data.
-  - `utils/`: Helper functions for file management and validation.
-- `data/`: Storage for photos, voice notes, and the database.
+  - `main.py`: Entry point, global router, and core bot loop.
+  - `database.py`: JSON-based data storage (`users.json`, `logs.json`).
+  - `handlers/`: Module-based conversation flows (Onboarding, Collection, Ad-hoc, etc.).
+  - `utils/`: UI menus, file management, weather, and transcription helpers.
+- `data/`
+  - `db/`: JSON database files.
+  - `media/`: Organized storage for photos and voice notes (`/user/date/filename`).
 - `requirements.txt`: Project dependencies.
 
 ## License 📄

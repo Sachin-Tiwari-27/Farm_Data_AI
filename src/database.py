@@ -3,8 +3,11 @@ import os
 import uuid
 from datetime import datetime
 
-DB_FILE = "data/db/users.json"
-LOGS_FILE = "data/db/logs.json"
+# Define paths
+DB_DIR = "data/db"
+MEDIA_DIR = "data/media"
+DB_FILE = os.path.join(DB_DIR, "users.json")
+LOGS_FILE = os.path.join(DB_DIR, "logs.json")
 
 # --- CONSTANTS ---
 ENV_FIELD = "Open Field"
@@ -46,6 +49,14 @@ class User:
         lm_data = data.get('landmarks', [])
         self.landmarks = [Landmark(lm) for lm in lm_data]
 
+    def to_dict(self):
+        return {
+            "id": self.id, "name": self.full_name, "farm": self.farm_name,
+            "lat": self.latitude, "lon": self.longitude,
+            "p_time": self.photo_time, "v_time": self.voice_time,
+            "landmarks": [l.to_dict() for l in self.landmarks]
+        }
+
 class LogEntry:
     def __init__(self, data):
         self.id = data.get('id')
@@ -56,25 +67,19 @@ class LogEntry:
         self.files = data.get('files', {})
         self.has_note = data.get('has_note', False)
         self.transcription = data.get('transcription', "")
-        self.landmark_context = data.get('landmark_context', {})
         self.landmark_name = data.get('landmark_name', f"Spot {self.landmark_id}")
-        
-        # Helpers for files
-        self.photos = []
-        for k, v in self.files.items():
-            if 'photo' in k or 'jpg' in v or 'png' in v:
-                self.photos.append(v)
-        
-        self.voice_paths = []
-        for k, v in self.files.items():
-            if 'voice' in k or 'note' in k or 'ogg' in v:
-                self.voice_paths.append(v)
+        self.photos = [v for k, v in self.files.items() if 'photo' in k or 'jpg' in v]
+        self.voice_paths = [v for k, v in self.files.items() if 'voice' in k or 'ogg' in v]
 
 # --- INIT ---
 def init_db():
-    os.makedirs("data/db", exist_ok=True)
+    """Defensive Initialization: Creates folders and empty JSONs if missing."""
+    os.makedirs(DB_DIR, exist_ok=True)
+    os.makedirs(MEDIA_DIR, exist_ok=True)
+    
     if not os.path.exists(DB_FILE):
         with open(DB_FILE, 'w') as f: json.dump({}, f)
+    
     if not os.path.exists(LOGS_FILE):
         with open(LOGS_FILE, 'w') as f: json.dump([], f)
 
@@ -82,28 +87,27 @@ init_db()
 
 # --- USER FUNCTIONS ---
 def get_user_profile(user_id):
-    with open(DB_FILE, 'r') as f:
-        data = json.load(f)
-    u_data = data.get(str(user_id))
-    return User(u_data) if u_data else None
+    try:
+        with open(DB_FILE, 'r') as f:
+            data = json.load(f)
+        u_data = data.get(str(user_id))
+        return User(u_data) if u_data else None
+    except Exception:
+        return None
 
 def save_user_profile(user_data):
-    with open(DB_FILE, 'r') as f:
-        data = json.load(f)
+    try:
+        with open(DB_FILE, 'r') as f:
+            data = json.load(f)
+    except: data = {}
+    
     data[str(user_data['id'])] = user_data
     with open(DB_FILE, 'w') as f:
         json.dump(data, f, indent=4)
 
-def get_all_users():
-    with open(DB_FILE, 'r') as f:
-        data = json.load(f)
-    return [User(u) for u in data.values()]
-
-# --- LANDMARK FUNCTIONS ---
 def get_user_landmarks(user_id):
     user = get_user_profile(user_id)
-    if not user: return []
-    return user.landmarks
+    return user.landmarks if user else []
 
 def get_landmark_by_id(user_id, landmark_id):
     user = get_user_profile(user_id)
@@ -112,118 +116,90 @@ def get_landmark_by_id(user_id, landmark_id):
         if lm.id == landmark_id: return lm
     return None
 
-# --- INTELLIGENT ROUTINE LOGIC ---
-
+# --- LOGGING FUNCTIONS ---
 def get_logs_by_date(user_id, date_str):
-    with open(LOGS_FILE, 'r') as f:
-        logs = json.load(f)
-    return [l for l in logs if str(l.get('user_id')) == str(user_id) and l.get('date') == date_str]
+    try:
+        with open(LOGS_FILE, 'r') as f: logs = json.load(f)
+        return [l for l in logs if str(l.get('user_id')) == str(user_id) and l.get('date') == date_str]
+    except: return []
 
 def get_pending_landmark_ids(user_id):
-    """Returns a list of landmark IDs that have NOT been checked today."""
     user = get_user_profile(user_id)
     if not user: return []
-    
     today = datetime.now().strftime("%Y-%m-%d")
     logs = get_logs_by_date(user_id, today)
-    
-    # IDs that have a log today
     logged_ids = set(l.get('landmark_id') for l in logs)
-    
-    # All active landmark IDs
     all_ids = set(lm.id for lm in user.landmarks)
-    
-    # Difference
-    pending_ids = list(all_ids - logged_ids)
-    pending_ids.sort()
-    return pending_ids
+    return sorted(list(all_ids - logged_ids))
 
 def is_routine_done(user_id, routine_type):
     if routine_type == 'evening':
         today = datetime.now().strftime("%Y-%m-%d")
         logs = get_logs_by_date(user_id, today)
         return any(l.get('landmark_id') == 0 for l in logs)
-        
     if routine_type == 'morning':
-        pending = get_pending_landmark_ids(user_id)
-        return len(pending) == 0
+        return len(get_pending_landmark_ids(user_id)) == 0
+    return False
 
-# --- LOGGING FUNCTIONS ---
 def create_entry(user_id, landmark_id, file_paths, status, weather, transcription=""):
-    name = f"Spot {landmark_id}"
-    context_snapshot = {}
-    
-    if landmark_id not in [0, 99]:
-        lm = get_landmark_by_id(user_id, landmark_id)
-        if lm:
-            name = lm.label
-            context_snapshot = {"env": lm.env, "medium": lm.medium}
-            
+    name = "Ad-Hoc"
     if landmark_id == 0: name = "Evening Summary"
-    if landmark_id == 99: name = "Ad-Hoc"
-    
-    entry_id = str(uuid.uuid4())
+    else:
+        lm = get_landmark_by_id(user_id, landmark_id)
+        if lm: name = lm.label
 
     entry = {
-        "id": entry_id,
+        "id": str(uuid.uuid4()),
         "user_id": user_id,
         "landmark_id": landmark_id,
         "landmark_name": name,
-        "landmark_context": context_snapshot,
-        "files": file_paths, # Dict of paths
+        "files": file_paths,
         "status": status,
         "weather": weather,
         "transcription": transcription,
         "timestamp": datetime.now().isoformat(),
         "date": datetime.now().strftime("%Y-%m-%d"),
-        "has_note": any("voice" in k or "note" in k for k in file_paths.keys())
+        "has_note": any("voice" in k for k in file_paths.keys())
     }
     
-    with open(LOGS_FILE, 'r') as f:
-        logs = json.load(f)
-    logs.append(entry)
-    with open(LOGS_FILE, 'w') as f:
-        json.dump(logs, f, indent=4)
+    try:
+        with open(LOGS_FILE, 'r') as f: logs = json.load(f)
+    except: logs = []
     
-    return entry_id
+    logs.append(entry)
+    with open(LOGS_FILE, 'w') as f: json.dump(logs, f, indent=4)
+    return entry['id']
 
 def update_transcription(entry_id, text):
-    with open(LOGS_FILE, 'r') as f:
-        logs = json.load(f)
-    for entry in logs:
-        if entry.get('id') == entry_id:
-            # Append if multiple notes
-            if entry.get('transcription') and "⏳" not in entry.get('transcription'):
-                entry['transcription'] += f" | {text}"
-            else:
+    try:
+        with open(LOGS_FILE, 'r') as f: logs = json.load(f)
+        for entry in logs:
+            if entry.get('id') == entry_id:
                 entry['transcription'] = text
-            break
-    with open(LOGS_FILE, 'w') as f:
-        json.dump(logs, f, indent=4)
+                break
+        with open(LOGS_FILE, 'w') as f: json.dump(logs, f, indent=4)
+    except: pass
 
-# --- HISTORY HELPERS ---
+def get_entries_for_date(user_id, date_str):
+    raw = get_logs_by_date(user_id, date_str)
+    return [LogEntry(l) for l in raw]
+
 def get_entries_by_date_range(user_id, start_date, end_date):
-    with open(LOGS_FILE, 'r') as f:
-        logs = json.load(f)
+    try:
+        with open(LOGS_FILE, 'r') as f: logs = json.load(f)
+    except: return {}
     
     filtered = []
     for l in logs:
         if str(l.get('user_id')) != str(user_id): continue
         try:
             l_date = datetime.strptime(l['date'], '%Y-%m-%d').date()
-            if start_date <= l_date <= end_date:
-                filtered.append(l)
+            if start_date <= l_date <= end_date: filtered.append(l)
         except: pass
-    
+        
     grouped = {}
     for l in filtered:
         d = l['date']
-        if d not in grouped: grouped[d] = {'entries': [], 'has_evening_summary': False}
+        if d not in grouped: grouped[d] = {'entries': []}
         grouped[d]['entries'].append(l)
-        if l['landmark_id'] == 0: grouped[d]['has_evening_summary'] = True
-            
     return dict(sorted(grouped.items(), reverse=True))
-
-def get_entries_for_date(user_id, date_str):
-    raw_logs = get_logs_by_date(user_id, date_str)
-    return [LogEntry(l) for l in raw_logs]

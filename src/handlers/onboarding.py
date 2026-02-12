@@ -5,12 +5,12 @@ from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, Mess
 import database as db
 from utils.validators import parse_time, validate_landmark_count
 from handlers.router import route_intent
+from utils.menus import MAIN_MENU_KBD
 
 logger = logging.getLogger(__name__)
 
 # --- STATES ---
-(NAME, FARM, LOCATION, P_TIME, V_TIME, 
- L_COUNT, L_ENV_BATCH, L_MED_BATCH, L_NAMING_LOOP) = range(9)
+(NAME, FARM, LOCATION, P_TIME, V_TIME, L_COUNT, L_ENV_BATCH, L_MED_BATCH, L_NAMING_LOOP) = range(9)
 
 # --- ENTRY POINT ---
 async def start_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -266,6 +266,6 @@ onboarding_handler = ConversationHandler(
             CallbackQueryHandler(handle_naming_input)
         ]
     },
-    fallbacks=[CommandHandler('cancel', cancel),
-    MessageHandler(filters.TEXT & ~filters.COMMAND, route_intent)]
+    fallbacks=[CommandHandler('cancel', cancel)],
+    
 )

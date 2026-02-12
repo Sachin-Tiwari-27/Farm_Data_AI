@@ -2,7 +2,7 @@ import logging
 import math
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, MessageHandler, CallbackQueryHandler, filters
-
+from utils.menus import MAIN_MENU_KBD
 import database as db
 from handlers.router import route_intent
 
@@ -17,7 +17,13 @@ async def view_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Displays the Farm Profile and List of Landmarks with Pagination."""
     user = db.get_user_profile(update.effective_user.id)
     if not user:
-        await update.message.reply_text("⚠️ User not found. Type /start to register.")
+        if update.message:
+            await update.message.reply_text(
+                "⚠️ **Registration Required**\n\n"
+                "I don't see your farm profile yet.\n"
+                "Please tap /start to set up your farm.",
+                parse_mode='Markdown'
+            )
         return ConversationHandler.END
 
     context.user_data['edit_lm_id'] = None
@@ -25,6 +31,10 @@ async def view_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if update.callback_query:
         query = update.callback_query
+        # Don't answer yet if we are going to edit text, but here we can
+        try: await query.answer()
+        except: pass
+        
         if query.data.startswith("page_"):
             page = int(query.data.split("_")[1])
             context.user_data['dash_page'] = page
@@ -45,7 +55,7 @@ async def view_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     kb = []
     for lm in current_items:
-        lbl = f"{lm.label} ({lm.env}/{lm.medium})"
+        lbl = f"{lm.label} ({lm.env})"
         kb.append([InlineKeyboardButton(lbl, callback_data=f"edit_{lm.id}")])
     
     nav_row = []
@@ -75,6 +85,9 @@ async def handle_dash_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "close_dash":
         await query.delete_message()
+        # Restore keyboard
+        
+        await query.message.reply_text("Use the menu below:", reply_markup=MAIN_MENU_KBD)
         return ConversationHandler.END
         
     if data == "add_spot":
@@ -94,12 +107,11 @@ async def handle_dash_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def open_edit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         query = update.callback_query
-        user_id = query.from_user.id
         msg_func = query.edit_message_text
     else:
-        user_id = update.effective_user.id
         msg_func = update.message.reply_text
 
+    user_id = update.effective_user.id
     lm_id = context.user_data.get('edit_lm_id')
     lm = db.get_landmark_by_id(user_id, lm_id)
     
@@ -134,7 +146,7 @@ async def handle_edit_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if action == "act_delete":
         user = db.get_user_profile(user_id)
         user.landmarks = [l for l in user.landmarks if l.id != lm_id]
-        _save_user_landmarks(user)
+        db.save_user_profile(user.to_dict()) # Fix: Ensure save logic uses dict
         await query.edit_message_text(f"🗑 **Spot deleted.**")
         return await view_dashboard(update, context)
         
@@ -167,10 +179,20 @@ async def handle_edit_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # --- SAVERS ---
 async def save_rename(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check if user wants to switch flows
+    result = await route_intent(update, context)
+    if result == ConversationHandler.END:
+        return result
+        
     new_name = update.message.text
     lm_id = context.user_data['edit_lm_id']
     user_id = update.effective_user.id
-    _update_landmark_field(user_id, lm_id, 'label', new_name)
+    
+    user = db.get_user_profile(user_id)
+    for lm in user.landmarks:
+        if lm.id == lm_id: lm.label = new_name
+    _save_user_landmarks(user)
+    
     await update.message.reply_text(f"✅ Renamed to **{new_name}**", parse_mode='Markdown')
     return await open_edit_menu(update, context)
 
@@ -179,9 +201,13 @@ async def save_env(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     val = query.data
     if val == "back_edit": return await open_edit_menu(update, context)
-    lm_id = context.user_data['edit_lm_id']
+    
     user_id = query.from_user.id
-    _update_landmark_field(user_id, lm_id, 'env', val)
+    lm_id = context.user_data['edit_lm_id']
+    user = db.get_user_profile(user_id)
+    for lm in user.landmarks:
+        if lm.id == lm_id: lm.env = val
+    _save_user_landmarks(user)
     return await open_edit_menu(update, context)
 
 async def save_med(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -189,32 +215,28 @@ async def save_med(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     val = query.data
     if val == "back_edit": return await open_edit_menu(update, context)
-    lm_id = context.user_data['edit_lm_id']
+    
     user_id = query.from_user.id
-    _update_landmark_field(user_id, lm_id, 'medium', val)
+    lm_id = context.user_data['edit_lm_id']
+    user = db.get_user_profile(user_id)
+    for lm in user.landmarks:
+        if lm.id == lm_id: lm.medium = val
+    _save_user_landmarks(user)
     return await open_edit_menu(update, context)
 
 def _save_user_landmarks(user):
-    save_data = {
+    # Helper to save via DB
+    # Reconstruct dict from object
+    data = {
         'id': user.id, 'name': user.full_name, 'farm': user.farm_name,
         'lat': user.latitude, 'lon': user.longitude,
         'p_time': user.photo_time, 'v_time': user.voice_time,
-        'l_count': len(user.landmarks),
         'landmarks': [l.to_dict() for l in user.landmarks]
     }
-    db.save_user_profile(save_data)
-
-def _update_landmark_field(user_id, lm_id, field, value):
-    user = db.get_user_profile(user_id)
-    for lm in user.landmarks:
-        if lm.id == lm_id:
-            setattr(lm, field, value)
-            break
-    _save_user_landmarks(user)
+    db.save_user_profile(data)
 
 # --- ADD NEW SPOT FLOW ---
 async def start_add_spot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # NEW: Ask for Name first
     if update.callback_query:
         await update.callback_query.edit_message_text(
             "➕ **New Spot**\n\n1️⃣ Type a Name (e.g., 'West Tunnel')\nOr tap Skip to auto-name.",
@@ -224,13 +246,17 @@ async def start_add_spot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return DASH_ADD_NAME
 
 async def add_spot_get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Handle text or callback
     if update.callback_query:
         query = update.callback_query
         await query.answer()
-        context.user_data['new_spot_name'] = None # Auto-generate later
+        context.user_data['new_spot_name'] = None
         msg_func = query.edit_message_text
     else:
+        # Check if user wants to switch flows
+        result = await route_intent(update, context)
+        if result == ConversationHandler.END:
+            return result
+            
         context.user_data['new_spot_name'] = update.message.text
         msg_func = update.message.reply_text
 
@@ -269,7 +295,6 @@ async def add_spot_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_id = max(l.id for l in user.landmarks) + 1
     
     label = custom_name if custom_name else f"Spot {new_id}"
-        
     new_lm = {"id": new_id, "label": label, "env": env, "medium": med}
     
     current_list = [l.to_dict() for l in user.landmarks]
@@ -289,7 +314,7 @@ dashboard_handler = ConversationHandler(
         CallbackQueryHandler(handle_dash_nav, pattern="^(page_|edit_|add_spot|close_dash)")
     ],
     states={
-        DASH_MAIN: [CallbackQueryHandler(handle_dash_nav)],
+        DASH_MAIN: [CallbackQueryHandler(handle_dash_nav), MessageHandler(filters.TEXT, route_intent)],
         DASH_EDIT_MENU: [CallbackQueryHandler(handle_edit_action)],
         DASH_RENAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_rename)],
         DASH_ENV: [CallbackQueryHandler(save_env)],
@@ -303,6 +328,8 @@ dashboard_handler = ConversationHandler(
     },
     fallbacks=[
         CommandHandler('cancel', view_dashboard),
-        MessageHandler(filters.TEXT & ~filters.COMMAND, route_intent)
-    ]
+        # SILENT KILLER
+        MessageHandler(filters.TEXT, route_intent)
+    ],
+    
 )
