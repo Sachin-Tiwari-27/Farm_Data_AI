@@ -9,7 +9,8 @@ from telegram.ext import (
 )
 
 import database as db
-from handlers.onboarding import onboarding_handler  # NEW IMPORT
+from handlers.onboarding import onboarding_handler
+from handlers.adhoc import adhoc_handler
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -24,8 +25,6 @@ async def schedule_user_jobs(application, user_id, p_time_str, v_time_str):
         for job in jq.get_jobs_by_name(name): job.schedule_removal()
     try:
         tz = pytz.timezone('Asia/Dubai')
-        # Simple string to time conversion (naive for now, improved later)
-        # In modular setup, we can import parse_time from utils if needed
         from datetime import datetime
         p_time = datetime.strptime(p_time_str, "%H:%M").time().replace(tzinfo=tz)
         v_time = datetime.strptime(v_time_str, "%H:%M").time().replace(tzinfo=tz)
@@ -58,9 +57,7 @@ if __name__ == '__main__':
 
     # Register Handlers
     app.add_handler(onboarding_handler)
+    app.add_handler(adhoc_handler)
     
-    # Note: The old 'collection', 'evening', 'history', 'adhoc' handlers are TEMPORARILY DISABLED 
-    # until we refactor them in the next steps.
-    
-    print("🤖 Farm Diary Bot LIVE (Phase 2B: New Onboarding).")
+    print("🤖 Farm Diary Bot LIVE (Phase 2C: Ad-Hoc Tagging).")
     app.run_polling()

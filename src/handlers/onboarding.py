@@ -45,7 +45,6 @@ async def get_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['lat'] = update.message.location.latitude
         context.user_data['lon'] = update.message.location.longitude
     else:
-        # Fallback if they type text instead of sharing location
         context.user_data['lat'] = 0.0
         context.user_data['lon'] = 0.0
         
@@ -68,7 +67,6 @@ async def get_v_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return V_TIME
     context.user_data['v_time'] = t
     
-    # --- START LANDMARK CONFIG ---
     kb = [
         [InlineKeyboardButton("3 Spots", callback_data="3"), InlineKeyboardButton("4 Spots", callback_data="4")],
         [InlineKeyboardButton("5 Spots", callback_data="5"), InlineKeyboardButton("6 Spots", callback_data="6")],
@@ -81,14 +79,11 @@ async def get_v_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return L_COUNT
 
 # --- BATCH SETUP LOGIC ---
-
 async def get_l_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     msg = update.message
-    
     count = None
     
-    # Handle Button Click
     if query:
         await query.answer()
         if query.data == "custom":
@@ -96,8 +91,6 @@ async def get_l_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return L_COUNT
         count = int(query.data)
         reply_func = query.edit_message_text
-    
-    # Handle Text Input (Custom)
     elif msg:
         count = validate_landmark_count(msg.text)
         if not count:
@@ -107,7 +100,6 @@ async def get_l_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data['l_count'] = count
     
-    # Ask Environment Batch
     kb = [
         [InlineKeyboardButton("All Open Field", callback_data="all_field")],
         [InlineKeyboardButton("All Polyhouse", callback_data="all_poly")],
@@ -122,13 +114,11 @@ async def get_env_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     choice = query.data
     
-    # Map selection to DB Constants
     if choice == "all_field": context.user_data['batch_env'] = db.ENV_FIELD
     elif choice == "all_poly": context.user_data['batch_env'] = db.ENV_POLY
     elif choice == "all_cea": context.user_data['batch_env'] = db.ENV_CEA
-    else: context.user_data['batch_env'] = None # Mixed
+    else: context.user_data['batch_env'] = None 
     
-    # Ask Medium Batch
     kb = [
         [InlineKeyboardButton("All Soil", callback_data="all_soil")],
         [InlineKeyboardButton("All Cocopeat", callback_data="all_coco")],
@@ -143,13 +133,11 @@ async def get_medium_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     choice = query.data
     
-    # Map selection
     if choice == "all_soil": context.user_data['batch_med'] = db.MED_SOIL
     elif choice == "all_coco": context.user_data['batch_med'] = db.MED_COCO
     elif choice == "all_hydro": context.user_data['batch_med'] = db.MED_HYDRO
-    else: context.user_data['batch_med'] = None # Mixed
+    else: context.user_data['batch_med'] = None 
     
-    # Initialize Loop
     context.user_data['current_lm_idx'] = 1
     context.user_data['final_landmarks'] = []
     
@@ -157,42 +145,33 @@ async def get_medium_batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return L_NAMING_LOOP
 
 # --- NAMING LOOP ---
-
 async def start_naming_loop(update_obj, context):
     """Called recursively to name each spot."""
     idx = context.user_data['current_lm_idx']
     total = context.user_data['l_count']
     
-    # Check if done
     if idx > total:
         return await finish_onboarding(update_obj, context)
     
-    # If "Mixed" was chosen, we default to Field/Soil and tell user to edit later (Fast Track)
-    # Or we can ask details. For this Phase 2B, let's keep it fast:
-    # We ask for NAME. If they skipped "Batch" settings, we apply defaults.
-    
     default_name = f"Spot {idx}"
-    
     kb = [[InlineKeyboardButton(f"⏩ Skip (Keep '{default_name}')", callback_data="skip_name")]]
     
-    # Show "Finish Early" button if we have done at least 3
     if idx > 3:
         kb.append([InlineKeyboardButton("✅ Finish Setup Now", callback_data="finish_early")])
         
     msg = f"🏷 **Name for Spot {idx}/{total}?**\n(e.g., 'North Tunnel', 'Tomato Patch')"
     
+    # Check if update_obj is a Message or CallbackQuery
     if hasattr(update_obj, 'edit_message_text'):
         await update_obj.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     else:
-        await update_obj.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        await update_obj.reply_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
         
     return L_NAMING_LOOP
 
 async def handle_naming_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles both Text Input (Custom Name) and Button Click (Skip/Finish)."""
     idx = context.user_data['current_lm_idx']
     
-    # 1. Determine Name
     if update.callback_query:
         query = update.callback_query
         await query.answer()
@@ -203,13 +182,12 @@ async def handle_naming_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         msg_obj = query
     else:
         name = update.message.text
-        msg_obj = update
+        # FIX: Pass the message object itself, so msg_obj.from_user works later
+        msg_obj = update.message 
         
-    # 2. Determine Env/Medium (Apply Batch or Default)
-    env = context.user_data.get('batch_env', db.ENV_FIELD) # Default to Field if mixed
-    med = context.user_data.get('batch_med', db.MED_SOIL)  # Default to Soil if mixed
+    env = context.user_data.get('batch_env', db.ENV_FIELD)
+    med = context.user_data.get('batch_med', db.MED_SOIL)
     
-    # 3. Create Landmark Dict
     lm = {
         "id": idx,
         "label": name,
@@ -218,14 +196,11 @@ async def handle_naming_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     }
     context.user_data['final_landmarks'].append(lm)
     
-    # 4. Next Iteration
     context.user_data['current_lm_idx'] += 1
     return await start_naming_loop(msg_obj, context)
 
 # --- FINALIZE ---
-
 async def finish_onboarding(update_obj, context: ContextTypes.DEFAULT_TYPE):
-    # If finished early, fill the rest with defaults
     current_list = context.user_data['final_landmarks']
     target_count = context.user_data['l_count']
     
@@ -239,8 +214,9 @@ async def finish_onboarding(update_obj, context: ContextTypes.DEFAULT_TYPE):
         })
         next_id += 1
         
-    # Save to DB
+    # FIX: Ensure user_id extraction works for both Message and CallbackQuery
     user_id = update_obj.from_user.id
+    
     profile = {
         'id': user_id,
         'name': context.user_data['name'],
@@ -249,19 +225,13 @@ async def finish_onboarding(update_obj, context: ContextTypes.DEFAULT_TYPE):
         'lon': context.user_data['lon'],
         'p_time': context.user_data['p_time'],
         'v_time': context.user_data['v_time'],
-        'l_count': len(current_list), # Actual count
-        'landmarks': current_list # The list of dicts
+        'l_count': len(current_list),
+        'landmarks': current_list
     }
     
     db.save_user_profile(profile)
     
-    # Message
-    final_msg = "✅ **Setup Complete!**\n\nYour farm is ready. You can edit specific spot details (Environment/Medium) in the **Dashboard**."
-    
-    # We need to trigger the Main Menu. 
-    # Since we are in a modular file, we can't import MAIN_MENU_KBD easily. 
-    # We will send a text reply, and the main.py will handle the menu on next interaction 
-    # OR we define a simple one here.
+    final_msg = "✅ **Setup Complete!**\n\nYour farm is ready. You can edit specific spot details in the **Dashboard**."
     
     kb = ReplyKeyboardMarkup([
         ['📸 Start Morning Check-in'],
@@ -274,7 +244,7 @@ async def finish_onboarding(update_obj, context: ContextTypes.DEFAULT_TYPE):
         await update_obj.edit_message_text(final_msg, parse_mode='Markdown')
         await update_obj.message.reply_text("👇 Use the menu below:", reply_markup=kb)
     else:
-        await update_obj.message.reply_text(final_msg, parse_mode='Markdown', reply_markup=kb)
+        await update_obj.reply_text(final_msg, parse_mode='Markdown', reply_markup=kb)
 
     return ConversationHandler.END
 
