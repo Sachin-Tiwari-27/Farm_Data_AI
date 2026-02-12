@@ -9,55 +9,48 @@ from telegram.ext import (
 )
 
 import database as db
+from utils.menus import MAIN_MENU_KBD
 from handlers.onboarding import onboarding_handler
+from handlers.collection import collection_handler, evening_handler
 from handlers.adhoc import adhoc_handler
+from handlers.dashboard import dashboard_handler
+from handlers.history import history_handler
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# --- JOB SCHEDULER ---
-async def schedule_user_jobs(application, user_id, p_time_str, v_time_str):
-    jq = application.job_queue
-    for name in [f"{user_id}_morning", f"{user_id}_evening"]:
-        for job in jq.get_jobs_by_name(name): job.schedule_removal()
-    try:
-        tz = pytz.timezone('Asia/Dubai')
-        from datetime import datetime
-        p_time = datetime.strptime(p_time_str, "%H:%M").time().replace(tzinfo=tz)
-        v_time = datetime.strptime(v_time_str, "%H:%M").time().replace(tzinfo=tz)
-        
-        jq.run_daily(trigger_morning, p_time, chat_id=user_id, name=f"{user_id}_morning")
-        jq.run_daily(trigger_evening, v_time, chat_id=user_id, name=f"{user_id}_evening")
-    except ValueError: pass
+async def start_msg(update, context):
+    await update.message.reply_text("🏠 **Home**", reply_markup=MAIN_MENU_KBD, parse_mode='Markdown')
 
-async def trigger_morning(context):
-    await context.bot.send_message(context.job.chat_id, "☀️ **Morning Check-in!**\nType /collection to start.", parse_mode='Markdown')
-
-async def trigger_evening(context):
-    await context.bot.send_message(context.job.chat_id, "🌙 **Evening Summary**\nType /record to start.", parse_mode='Markdown')
+async def cancel_msg(update, context):
+    await update.message.reply_text("❌ Cancelled.", reply_markup=MAIN_MENU_KBD)
 
 async def post_init(application: Application):
     await application.bot.set_my_commands([
-        BotCommand("start", "🏠 Home / Register"),
+        BotCommand("start", "🏠 Home"),
         BotCommand("profile", "👤 Dashboard"),
-        BotCommand("history", "📊 View History"),
-        BotCommand("cancel", "❌ Stop Action")
+        BotCommand("history", "📊 History"),
+        BotCommand("cancel", "❌ Cancel Action")
     ])
-    # Restore schedules
-    for user in db.get_all_users():
-        await schedule_user_jobs(application, user.id, user.photo_time, user.voice_time)
 
 if __name__ == '__main__':
     if not TOKEN: exit("No TOKEN")
     defaults = Defaults(tzinfo=pytz.timezone('Asia/Dubai'))
     app = ApplicationBuilder().token(TOKEN).defaults(defaults).post_init(post_init).build()
 
-    # Register Handlers
+    # 1. Global Commands (Always work)
+    app.add_handler(CommandHandler('start', start_msg))
+    app.add_handler(CommandHandler('cancel', cancel_msg))
+
+    # 2. Conversation Handlers (With built-in Router Fallbacks)
     app.add_handler(onboarding_handler)
+    app.add_handler(collection_handler)
+    app.add_handler(evening_handler)
     app.add_handler(adhoc_handler)
+    app.add_handler(dashboard_handler)
+    app.add_handler(history_handler)
     
-    print("🤖 Farm Diary Bot LIVE (Phase 2C: Ad-Hoc Tagging).")
+    print("🤖 Farm Diary Bot LIVE (Phase 2E: Full Production).")
     app.run_polling()
