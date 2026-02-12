@@ -9,6 +9,7 @@ import database as db
 from utils.files import save_telegram_file
 from utils.transcriber import transcribe_audio
 from utils.weather import get_weather_data
+from handlers.router import route_intent
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +211,7 @@ adhoc_handler = ConversationHandler(
         MessageHandler(filters.VOICE, start_adhoc_direct_voice)
     ],
     states={
+        # ... (keep states as is)
         ADHOC_WAIT_PHOTO: [
             MessageHandler(filters.PHOTO, process_adhoc_photo),
             CallbackQueryHandler(skip_adhoc_photo, pattern="^skip_photo$")
@@ -226,5 +228,8 @@ adhoc_handler = ConversationHandler(
             CallbackQueryHandler(finalize_adhoc, pattern="^tag_")
         ]
     },
-    fallbacks=[CommandHandler('cancel', cancel)]
+    fallbacks=[
+        CommandHandler('cancel', cancel),
+        MessageHandler(filters.TEXT & ~filters.COMMAND, route_intent)
+    ]
 )

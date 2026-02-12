@@ -4,6 +4,7 @@ from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, Mess
 
 import database as db
 from utils.validators import parse_time, validate_landmark_count
+from handlers.router import route_intent
 
 logger = logging.getLogger(__name__)
 
@@ -265,5 +266,6 @@ onboarding_handler = ConversationHandler(
             CallbackQueryHandler(handle_naming_input)
         ]
     },
-    fallbacks=[CommandHandler('cancel', cancel)]
+    fallbacks=[CommandHandler('cancel', cancel),
+    MessageHandler(filters.TEXT & ~filters.COMMAND, route_intent)]
 )
