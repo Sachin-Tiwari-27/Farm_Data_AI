@@ -35,8 +35,14 @@ def parse_time(input_str, is_evening=False):
             hour += 12
         elif meridian == 'am' and hour == 12:
             hour = 0
-    # Handle inferred PM (if no meridian provided, e.g. "6:30" in evening section)
-    elif is_evening and hour < 12:
-        hour += 12
-        
+            
     return f"{hour:02d}:{minute:02d}"
+
+def validate_landmark_count(text):
+    """Ensures input is a number between 1 and 20."""
+    if not text.isdigit():
+        return None
+    val = int(text)
+    if 1 <= val <= 20:
+        return val
+    return None
