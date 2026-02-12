@@ -32,26 +32,23 @@ async def run_transcription_bg(file_path, entry_id):
 
 async def start_collection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
-    # Check if already done
     if db.is_routine_done(user_id, 'morning'):
          await update.message.reply_text("✅ **Morning Routine Done.**\nUse Ad-Hoc for extras.", reply_markup=MAIN_MENU_KBD, parse_mode='Markdown')
          return ConversationHandler.END
 
-    # Initialize Session
     landmarks = db.get_user_landmarks(user_id)
     if not landmarks:
-        await update.message.reply_text("⚠️ No spots configured. Please go to /start or Dashboard.", reply_markup=MAIN_MENU_KBD)
+        await update.message.reply_text("⚠️ No spots configured.", reply_markup=MAIN_MENU_KBD)
         return ConversationHandler.END
 
     context.user_data.update({
         'landmarks': landmarks,
         'current_idx': 0,
         'temp_photos': {},
-        'temp_status': None
+        'temp_status': None,
+        'msg_id': None # For editing
     })
     
-    # Get Weather
     user = db.get_user_profile(user_id)
     weather = get_weather_data(user.latitude, user.longitude)
     context.user_data['weather'] = weather or {}
@@ -63,27 +60,30 @@ async def start_collection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await request_landmark_photos(update, context)
 
 async def request_landmark_photos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query: msg_obj = update.callback_query.message
-    else: msg_obj = update.message
-    
+    # Handles loop reset
     idx = context.user_data['current_idx']
     landmarks = context.user_data['landmarks']
     
     if idx >= len(landmarks):
-        await msg_obj.reply_text("🎉 **All Spots Checked!**", reply_markup=MAIN_MENU_KBD, parse_mode='Markdown')
+        await context.bot.send_message(update.effective_chat.id, "🎉 **All Spots Checked!**", reply_markup=MAIN_MENU_KBD, parse_mode='Markdown')
         return ConversationHandler.END
     
     lm = landmarks[idx]
-    # Display Rich Info: "Spot 1: Tomato (Polyhouse)"
-    await msg_obj.reply_text(
+    
+    # New Message for new spot
+    msg = await context.bot.send_message(
+        update.effective_chat.id,
         f"📍 **{lm.label}** ({idx+1}/{len(landmarks)})\n"
-        f"🏠 {lm.env} | 🌱 {lm.medium}\n\n"
-        f"📸 **Step 1/3: Wide Shot**", 
+        f"🏠 {lm.env} | 🌱 {lm.medium}\n"
+        f"────────────────\n"
+        f"📸 **Step 1/3:** Send Wide Shot.", 
         parse_mode='Markdown'
     )
+    context.user_data['msg_id'] = msg.message_id
+    context.user_data['temp_photos'] = {} # Reset
     return CAPTURE_WIDE
 
-# --- PHOTO STEPS ---
+# --- PHOTO STEPS (Feedback Loop) ---
 
 async def handle_photo_step(update: Update, context: ContextTypes.DEFAULT_TYPE, key, next_step):
     if not update.message.photo: return None
@@ -94,11 +94,34 @@ async def handle_photo_step(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     
     context.user_data['temp_photos'][key] = path
     
-    if key == 'wide': 
-        await update.message.reply_text("📸 **Step 2/3: Close-up**", parse_mode='Markdown')
-    elif key == 'close': 
-        await update.message.reply_text("📸 **Step 3/3: Soil/Base**", parse_mode='Markdown')
-    elif key == 'soil':
+    # Progress Bar Text Logic
+    idx = context.user_data['current_idx']
+    lm = context.user_data['landmarks'][idx]
+    
+    base_txt = f"📍 **{lm.label}** ({idx+1}/{len(context.user_data['landmarks'])})\n🏠 {lm.env} | 🌱 {lm.medium}\n────────────────\n"
+    
+    status_txt = ""
+    if 'wide' in context.user_data['temp_photos']: status_txt += "✅ Wide Shot received.\n"
+    if 'close' in context.user_data['temp_photos']: status_txt += "✅ Close-up received.\n"
+    if 'soil' in context.user_data['temp_photos']: status_txt += "✅ Soil shot received.\n"
+    
+    next_instr = ""
+    if key == 'wide': next_instr = "📸 **Step 2/3:** Send Close-up."
+    elif key == 'close': next_instr = "📸 **Step 3/3:** Send Soil/Base shot."
+    
+    # Edit the prompt message
+    try:
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=context.user_data['msg_id'],
+            text=f"{base_txt}{status_txt}{next_instr}",
+            parse_mode='Markdown'
+        )
+    except Exception: pass # Ignore edit errors if message too old
+    
+    # Delete the user's photo message to keep chat clean? (Optional, skipping for now)
+
+    if next_step == CONFIRM_SET:
         kb = [[InlineKeyboardButton("✅ Confirm", callback_data="confirm"), InlineKeyboardButton("🔄 Retake", callback_data="retake")]]
         await update.message.reply_text("Photos clear?", reply_markup=InlineKeyboardMarkup(kb))
     
@@ -117,8 +140,11 @@ async def handle_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text("🔄 Restarting this spot...")
         return await request_landmark_photos(update, context)
         
-    kb = [[InlineKeyboardButton("🟢 Healthy", callback_data="Healthy"), InlineKeyboardButton("🔴 Issue", callback_data="Issue")]]
-    await query.edit_message_text("Status?", reply_markup=InlineKeyboardMarkup(kb))
+    kb = [
+        [InlineKeyboardButton("🟢 Healthy", callback_data="Healthy")],
+        [InlineKeyboardButton("🔴 Issue", callback_data="Issue"), InlineKeyboardButton("🟠 Unsure", callback_data="Unsure")]
+    ]
+    await query.edit_message_text("How does it look?", reply_markup=InlineKeyboardMarkup(kb))
     return LOG_STATUS
 
 async def log_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -127,18 +153,23 @@ async def log_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = query.data
     context.user_data['temp_status'] = status
     
+    # Dynamic Prompts
     if status == "Healthy":
-        await finalize_landmark_entry(update, context, voice_file=None)
-        await query.edit_message_text(f"✅ Marked **{status}**.", parse_mode='Markdown')
-        context.user_data['current_idx'] += 1
-        return await request_landmark_photos(update, context)
-    else:
-        kb = [[InlineKeyboardButton("🎙 Add Note", callback_data="add_voice"), InlineKeyboardButton("➡️ Skip", callback_data="skip_note")]]
-        await query.edit_message_text(f"⚠️ Marked **{status}**. Add details?", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-        return ADD_NOTE
+        msg = "✅ **Marked Healthy.**\nAny observations to add? (Optional)"
+        kb = [[InlineKeyboardButton("🎙 Add Note", callback_data="add_voice"), InlineKeyboardButton("⏩ Skip", callback_data="skip_note")]]
+    elif status == "Issue":
+        msg = "⚠️ **Issue Flagged.**\nWhat do you see? (e.g., 'Pests', 'Yellowing')\n*Voice Note Recommended.*"
+        kb = [[InlineKeyboardButton("🎙 Describe Issue", callback_data="add_voice")]] # No skip for issue? Let's allow skip via text command if really needed, but push for voice.
+        kb.append([InlineKeyboardButton("⏩ Skip (Not Recommended)", callback_data="skip_note")])
+    else: # Unsure
+        msg = "🟠 **Unsure.**\nDescribe what feels wrong or why you are suspicious."
+        kb = [[InlineKeyboardButton("🎙 Explain", callback_data="add_voice"), InlineKeyboardButton("⏩ Skip", callback_data="skip_note")]]
+
+    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    return ADD_NOTE
 
 async def prompt_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.edit_message_text("🎙 **Tap mic to record.**")
+    await update.callback_query.edit_message_text("🎙 **Listening...**\n(Tap the mic button)")
     return ADD_NOTE
 
 async def handle_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,8 +182,10 @@ async def handle_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await request_landmark_photos(update, context)
 
 async def skip_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     await finalize_landmark_entry(update, context, voice_file=None)
-    await update.callback_query.edit_message_text("✅ Saved.")
+    await query.edit_message_text("✅ Saved.")
     context.user_data['current_idx'] += 1
     return await request_landmark_photos(update, context)
 
@@ -165,7 +198,8 @@ async def finalize_landmark_entry(update: Update, context: ContextTypes.DEFAULT_
     saved_paths = {}
     for k, p in context.user_data['temp_photos'].items():
         with open(p, 'rb') as f: saved_paths[k] = save_telegram_file(f, user.id, user.farm_name, lm.id, k)
-        os.remove(p)
+        try: os.remove(p)
+        except: pass
     
     bg_voice = None
     if voice_file:
@@ -179,8 +213,7 @@ async def finalize_landmark_entry(update: Update, context: ContextTypes.DEFAULT_
     if bg_voice:
         context.application.create_task(run_transcription_bg(bg_voice, entry_id))
 
-# --- EVENING FLOW ---
-
+# --- EVENING FLOW (unchanged) ---
 async def start_evening_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if db.is_routine_done(update.effective_user.id, 'evening'):
         await update.message.reply_text("✅ **Already Recorded.**", reply_markup=MAIN_MENU_KBD, parse_mode='Markdown')
@@ -204,12 +237,8 @@ async def save_evening_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- EXPORT HANDLERS ---
 collection_handler = ConversationHandler(
-    entry_points=[
-        CommandHandler('collection', start_collection), 
-        MessageHandler(filters.Regex("^📸 Start Morning Check-in$"), start_collection)
-    ],
+    entry_points=[CommandHandler('collection', start_collection), MessageHandler(filters.Regex("^📸 Start Morning Check-in$"), start_collection)],
     states={
-        # ... (keep states as is)
         CAPTURE_WIDE: [MessageHandler(filters.PHOTO, handle_wide)],
         CAPTURE_CLOSE: [MessageHandler(filters.PHOTO, handle_close)],
         CAPTURE_SOIL: [MessageHandler(filters.PHOTO, handle_soil)],
@@ -219,15 +248,12 @@ collection_handler = ConversationHandler(
     },
     fallbacks=[
         CommandHandler('cancel', start_collection), 
-        MessageHandler(filters.TEXT & ~filters.COMMAND, route_intent) # Router is already here
+        MessageHandler(filters.TEXT & ~filters.COMMAND, route_intent) 
     ]
 )
 
 evening_handler = ConversationHandler(
     entry_points=[CommandHandler('record', start_evening_flow), MessageHandler(filters.Regex("^🎙 Record Evening Summary$"), start_evening_flow)],
     states={VOICE_RECORD: [MessageHandler(filters.VOICE, save_evening_note)]},
-    fallbacks=[
-        CommandHandler('cancel', start_evening_flow), 
-        MessageHandler(filters.TEXT & ~filters.COMMAND, route_intent) # Router is already here
-    ]
+    fallbacks=[MessageHandler(filters.TEXT, route_intent)]
 )
