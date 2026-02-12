@@ -194,7 +194,7 @@ async def finalize_adhoc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if lm_obj: lm_label = lm_obj.label
         
     await query.edit_message_text(
-        f"✅ **Saved to {lm_label}.**\n\n Use ^📝 Quick Ad-Hoc Note$ to add more notes.", 
+        f"✅ **Saved to {lm_label}.**\n\n Use 📝 Quick Ad-Hoc Note to add more notes.", 
         parse_mode='Markdown'
     )
     return ConversationHandler.END
