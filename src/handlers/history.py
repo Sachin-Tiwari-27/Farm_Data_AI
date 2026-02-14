@@ -169,31 +169,35 @@ async def handle_grid_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_date_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
-    date_str = query.data.replace('view_date_', '')
+    
+    date_str = query.data.replace("view_date_", "")
+    user_id = update.effective_user.id
     entries = db.get_entries_for_date(user_id, date_str)
     
-    summary = f"📊 **Log: {date_str}**\n" + "━"*15 + "\n"
-    for e in entries:
-        t = e.timestamp.strftime('%H:%M')
-        if e.landmark_id == 0: summary += f"🌙 Summary ({t})\n"
-        elif e.landmark_id == 99: summary += f"⚠️ Ad-Hoc ({t})\n"
-        else: summary += f"{'🟢' if e.status=='Healthy' else '🔴'} {e.landmark_name}\n"
-        if e.transcription: summary += f"   ╚ 📝 {e.transcription[:50]}...\n"
+    if not entries:
+        await query.message.reply_text("No logs found for this date.")
+        return VIEW_HISTORY
 
-    await query.edit_message_text(summary, parse_mode='Markdown')
-    
-    # Media
     for e in entries:
-        media = []
-        if hasattr(e, 'photos') and e.photos:
-            for p in e.photos:
-                if os.path.exists(p): media.append(InputMediaPhoto(open(p, 'rb')))
-        elif e.files:
-            for k, v in e.files.items():
-                if 'photo' in k and os.path.exists(v): media.append(InputMediaPhoto(open(v, 'rb')))
+        # Improved media detection for SQLite keys
+        msg = (
+            f"📅 **{e.timestamp.strftime('%H:%M')} - {e.category.upper()}**\n"
+            f"📍 Spot: {e.landmark_name}\n"
+            f"🩺 Status: {e.status}\n"
+            f"📝 Note: {e.transcription if e.transcription else 'No voice note.'}\n"
+        )
+        await query.message.reply_text(msg, parse_mode='Markdown')
         
-        if media: await query.message.reply_media_group(media)
+        media = []
+        if e.files:
+            for k, v in e.files.items():
+                # Catch 'wide', 'close', 'soil', AND any key containing 'photo'
+                is_photo = any(x in k for x in ['wide', 'close', 'soil', 'photo'])
+                if is_photo and os.path.exists(v):
+                    media.append(InputMediaPhoto(open(v, 'rb')))
+        
+        if media:
+            await query.message.reply_media_group(media)
     
     kb = [[InlineKeyboardButton("◀️ Back to Menu", callback_data="back_main")]]
     await query.message.reply_text("End of Log.", reply_markup=InlineKeyboardMarkup(kb))

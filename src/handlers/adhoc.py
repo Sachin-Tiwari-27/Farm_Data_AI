@@ -206,37 +206,55 @@ async def ask_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def finalize_adhoc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    lm_id = int(query.data.split('_')[1])
-    user_id = query.from_user.id
+    
+    user_id = update.effective_user.id
     user = db.get_user_profile(user_id)
     
+    # FIX: Get the ID directly from the button pattern "tag_{id}"
+    # This prevents the KeyError 'adhoc_tag'
+    raw_tag = query.data.replace("tag_", "")
+    lm_id = int(raw_tag) if raw_tag.isdigit() else 99 # 99 for General
+    
     saved_paths = {}
-    for i, p in enumerate(context.user_data['adhoc_photos']):
-        with open(p, 'rb') as f:
-            saved_paths[f"photo_{i}"] = save_telegram_file(f, user.id, user.farm_name, lm_id, f"adhoc_p{i}")
-        try: os.remove(p)
-        except: pass
+    # Save Photos
+    for i, p in enumerate(context.user_data.get('adhoc_photos', [])):
+        if os.path.exists(p):
+            with open(p, 'rb') as f:
+                saved_paths[f"photo_{i}"] = save_telegram_file(f, user.id, user.farm_name, lm_id, f"adhoc_p{i}")
+            try: os.remove(p)
+            except: pass
         
+    # Save Voices
     bg_voices = []
-    for i, buf in enumerate(context.user_data['adhoc_voices']):
+    for i, buf in enumerate(context.user_data.get('adhoc_voices', [])):
         path = save_telegram_file(buf, user.id, user.farm_name, lm_id, f"adhoc_note{i}")
         saved_paths[f"voice_{i}"] = path
         bg_voices.append(path)
         
+    # --- DB CALL UPDATED ---
     entry_id = db.create_entry(
-        user.id, lm_id, saved_paths, "Observation", 
+        user.id, 
+        lm_id, 
+        saved_paths, 
+        "Observation", 
         get_weather_data(user.latitude, user.longitude), 
+        category='adhoc',
         transcription="⏳ Transcribing..." if bg_voices else ""
     )
     
     for v in bg_voices:
         context.application.create_task(run_transcription_bg(v, entry_id))
         
-    await query.edit_message_text("✅ **Ad-Hoc Entry Saved.**")
-    # Restore keyboard
-    
+    await query.edit_message_text(f"✅ **Ad-Hoc Entry Saved to {'General' if lm_id == 99 else 'Spot ' + str(lm_id)}**")
     await query.message.reply_text("Use the menu below:", reply_markup=MAIN_MENU_KBD)
+    
+    # Cleanup session
+    context.user_data.pop('adhoc_photos', None)
+    context.user_data.pop('adhoc_voices', None)
+    
     return ConversationHandler.END
+
+# --- HANDLER FOR ADHOC ENTRIES ---
 
 adhoc_handler = ConversationHandler(
     entry_points=[

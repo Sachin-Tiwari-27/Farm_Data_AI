@@ -5,6 +5,7 @@ import logging
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+
 import database as db
 from utils.files import save_telegram_file
 from utils.transcriber import transcribe_audio
@@ -14,8 +15,10 @@ from handlers.router import route_intent
 
 logger = logging.getLogger(__name__)
 
+# --- STATES ---
 (CAPTURE_WIDE, CAPTURE_CLOSE, CAPTURE_SOIL, CONFIRM_PHOTOS, LOG_STATUS, VOICE_LOOP) = range(6)
 
+# --- HELPERS ---
 async def run_transcription_bg(file_path, entry_id):
     if not file_path or not os.path.exists(file_path): return
     try:
@@ -24,112 +27,109 @@ async def run_transcription_bg(file_path, entry_id):
         if text: db.update_transcription(entry_id, text)
     except Exception: pass
 
-async def save_temp_photo(update, context, key):
-    try:
-        os.makedirs("data/media", exist_ok=True)
-        f = await update.message.photo[-1].get_file()
-        path = f"data/media/{update.effective_user.id}_temp_{key}.jpg"
-        await f.download_to_drive(path)
-        context.user_data['temp_photos'][key] = path
-        return True
-    except Exception as e:
-        logger.error(f"Save Error: {e}")
-        return False
-
+# --- MORNING FLOW START ---
 async def start_collection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    # 1. GATEKEEPER CHECK
-    user = db.get_user_profile(user_id)
-    if not user:
-        await update.message.reply_text(
-            "⚠️ **Registration Required**\n\n"
-            "I don't see your farm profile yet.\n"
-            "Please tap /start to set up your farm.",
-            parse_mode='Markdown'
-        )
+    user = db.get_user_profile(update.effective_user.id)
+    if not user or not user.landmarks:
+        await update.message.reply_text("⚠️ You have no landmarks set up. Use /start to configure them.")
         return ConversationHandler.END
 
-    context.user_data.clear()
-    
-    pending_ids = db.get_pending_landmark_ids(user_id)
-    if not pending_ids:
-        await update.message.reply_text("✅ **All Morning Tasks Done!**", reply_markup=MAIN_MENU_KBD, parse_mode='Markdown')
-        return ConversationHandler.END
-
-    all_landmarks = db.get_user_landmarks(user_id)
-    context.user_data['queue'] = [lm for lm in all_landmarks if lm.id in pending_ids]
+    # Initialize Queue
+    context.user_data['queue'] = user.landmarks
     context.user_data['current_ptr'] = 0
-    context.user_data['temp_photos'] = {}
-    context.user_data['temp_voices'] = []
     
-    user = db.get_user_profile(user_id)
-    weather = get_weather_data(user.latitude, user.longitude)
-    context.user_data['weather'] = weather or {}
-    
-    await update.message.reply_text(f"📝 **Starting Check-in** ({len(context.user_data['queue'])} spots).", parse_mode='Markdown')
     return await ask_wide_shot(update, context)
 
 async def ask_wide_shot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    queue = context.user_data['queue']
-    ptr = context.user_data['current_ptr']
+    queue = context.user_data.get('queue')
+    ptr = context.user_data.get('current_ptr')
     
-    # Determine the message object to use
-    if update.callback_query:
-        msg = update.callback_query.message
-    else:
-        msg = update.message
-    
+    # Check if we are done
     if ptr >= len(queue):
-        await msg.reply_text("🎉 **Check-in Complete!**", reply_markup=MAIN_MENU_KBD, parse_mode='Markdown')
+        await update.effective_message.reply_text("✅ **All spots checked!** You are done for the morning.", reply_markup=MAIN_MENU_KBD, parse_mode='Markdown')
         return ConversationHandler.END
     
     lm = queue[ptr]
+    # Reset temp storage for this specific spot
     context.user_data['temp_photos'] = {}
     context.user_data['temp_voices'] = []
+    context.user_data['weather'] = get_weather_data(db.get_user_profile(update.effective_user.id).latitude, db.get_user_profile(update.effective_user.id).longitude)
     
-    await msg.reply_text(f"📍 **{lm.label}**\n📸 Step 1: Send **Wide Shot** (Overall view).", parse_mode='Markdown')
+    msg_text = (
+        f"📍 **Spot {ptr+1}/{len(queue)}: {lm.label}**\n"
+        f"🌱 Env: {lm.env}\n"
+        f"📸 **Step 1:** Take a **Wide Shot**."
+    )
+    
+    if update.callback_query:
+        await update.callback_query.edit_message_text(msg_text, parse_mode='Markdown')
+    else:
+        await update.message.reply_text(msg_text, reply_markup=ReplyKeyboardRemove(), parse_mode='Markdown')
+        
     return CAPTURE_WIDE
 
+# --- PHOTO HANDLERS ---
+async def save_temp_photo(update, context, key):
+    try:
+        f = await update.message.photo[-1].get_file()
+        path = f"data/media/{update.effective_user.id}_temp_{key}.jpg"
+        os.makedirs("data/media", exist_ok=True)
+        await f.download_to_drive(path)
+        context.user_data['temp_photos'][key] = path
+    except Exception as e:
+        logger.error(f"Photo save error: {e}")
+
 async def handle_wide(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.photo: return CAPTURE_WIDE
-    await save_temp_photo(update, context, 'wide')
-    await update.message.reply_text("✅ Received.\n📸 Step 2: Send **Close-up**.", parse_mode='Markdown')
+    await save_temp_photo(update, context, "wide")
+    await update.message.reply_text("📸 **Step 2:** Now take a **Close-up** (leaves/fruit).")
     return CAPTURE_CLOSE
 
 async def handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.photo: return CAPTURE_CLOSE
-    await save_temp_photo(update, context, 'close')
-    await update.message.reply_text("✅ Received.\n📸 Step 3: Send **Soil/Base**.", parse_mode='Markdown')
+    await save_temp_photo(update, context, "close")
+    await update.message.reply_text("📸 **Step 3:** Finally, take a **Soil/Base** photo.")
     return CAPTURE_SOIL
 
 async def handle_soil(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.photo: return CAPTURE_SOIL
-    await save_temp_photo(update, context, 'soil')
+    await save_temp_photo(update, context, "soil")
     
-    kb = [[InlineKeyboardButton("✅ Confirm", callback_data="confirm_photos"), InlineKeyboardButton("🔄 Retake", callback_data="retake")]]
-    await update.message.reply_text("✅ Photos done.", reply_markup=InlineKeyboardMarkup(kb))
+    # Review Keyboard
+    kb = [
+        [InlineKeyboardButton("✅ Confirm Photos", callback_data="confirm_photos")],
+        [InlineKeyboardButton("🔄 Retake", callback_data="retake")]
+    ]
+    await update.message.reply_text("Photos captured. Proceed?", reply_markup=InlineKeyboardMarkup(kb))
     return CONFIRM_PHOTOS
 
 async def handle_retake(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("🔄 Restarting this spot...")
-    return await ask_wide_shot(update, context)
+    await query.message.reply_text("🔄 Restarting this spot. Please send the **Wide Shot** again.")
+    return CAPTURE_WIDE
 
+# --- STATUS & VOICE ---
 async def ask_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    kb = [[InlineKeyboardButton("🟢 Healthy", callback_data="Healthy")], [InlineKeyboardButton("🔴 Issue", callback_data="Issue"), InlineKeyboardButton("🟠 Unsure", callback_data="Unsure")]]
-    await query.edit_message_text("📊 **Assessment?**", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    
+    kb = [
+        [InlineKeyboardButton("🟢 Healthy", callback_data="Healthy")],
+        [InlineKeyboardButton("🔴 Issue", callback_data="Issue")],
+        [InlineKeyboardButton("🟠 Unsure", callback_data="Unsure")]
+    ]
+    await query.edit_message_text("🩺 **What is the status of this spot?**", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     return LOG_STATUS
 
 async def start_voice_loop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data['temp_status'] = query.data
-    kb = [[InlineKeyboardButton("➡️ Skip Note", callback_data="voice_done")]]
-    await query.edit_message_text("🎙 **Record Note** (or Skip).", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+    
+    kb = [[InlineKeyboardButton("⏭️ Skip / Done", callback_data="voice_done")]]
+    await query.edit_message_text(
+        f"Selected: **{query.data}**\n\n🎙 **Voice Notes:**\nRecord observations now. You can send multiple.\nPress Done when finished.",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode='Markdown'
+    )
     return VOICE_LOOP
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -137,31 +137,41 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buf = io.BytesIO()
     await f.download_to_memory(buf)
     context.user_data['temp_voices'].append(buf)
-    kb = [[InlineKeyboardButton("✅ Finish Spot", callback_data="voice_done")]]
-    await update.message.reply_text("🎙 **Saved.**", reply_markup=InlineKeyboardMarkup(kb))
+    await update.message.reply_text("🎤 Note saved. Record another or press **Skip/Done**.", 
+                                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏭️ Skip / Done", callback_data="voice_done")]]))
     return VOICE_LOOP
 
+# --- FINALIZE SPOT ---
 async def finalize_spot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user = db.get_user_profile(update.effective_user.id)
+    
+    # Get the current landmark
     lm = context.user_data['queue'][context.user_data['current_ptr']]
     
+    # Save Photos
     saved_paths = {}
     for k, p in context.user_data['temp_photos'].items():
-        with open(p, 'rb') as f: saved_paths[k] = save_telegram_file(f, user.id, user.farm_name, lm.id, k)
+        with open(p, 'rb') as f:
+            saved_paths[k] = save_telegram_file(f, user.id, user.farm_name, lm.id, k)
+        # Cleanup temp
+        try: os.remove(p)
+        except: pass
     
+    # Save Voices
     bg_voices = []
     for i, v_buf in enumerate(context.user_data['temp_voices']):
         path = save_telegram_file(v_buf, user.id, user.farm_name, lm.id, f"note_{i}")
         saved_paths[f"voice_{i}"] = path
         bg_voices.append(path)
         
+    # --- DB CALL (SQLite) ---
     entry_id = db.create_entry(
         user.id, lm.id, saved_paths, 
         context.user_data['temp_status'], 
         context.user_data.get('weather', {}),
-        transcription="⏳ Transcribing..." if bg_voices else ""
+        category='morning' 
     )
     
     for v in bg_voices:
@@ -171,26 +181,14 @@ async def finalize_spot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['current_ptr'] += 1
     return await ask_wide_shot(update, context)
 
-# --- EVENING HANDLER ---
+# --- EVENING FLOW ---
 async def start_evening_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    # 1. GATEKEEPER CHECK
-    user = db.get_user_profile(user_id)
-    if not user:
-        await update.message.reply_text(
-            "⚠️ **Registration Required**\n\n"
-            "I don't see your farm profile yet.\n"
-            "Please tap /start to set up your farm.",
-            parse_mode='Markdown'
-        )
-        return ConversationHandler.END
-
-    context.user_data.clear()
-    if db.is_routine_done(user_id, 'evening'):
-        await update.message.reply_text("✅ **Evening Summary Done.**", reply_markup=MAIN_MENU_KBD)
-        return ConversationHandler.END
-    await update.message.reply_text("🎙 **Evening Summary**\nRecord your daily observations.", parse_mode='Markdown')
+    await update.message.reply_text(
+        "🌙 **Evening Check-in**\n"
+        "Please record a voice note summarizing your day (activities, issues, plans for tomorrow).",
+        reply_markup=ReplyKeyboardRemove(),
+        parse_mode='Markdown'
+    )
     return VOICE_LOOP
 
 async def save_evening_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -198,8 +196,17 @@ async def save_evening_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buf = io.BytesIO()
     await f.download_to_memory(buf)
     user = db.get_user_profile(update.effective_user.id)
+    
     saved_path = save_telegram_file(buf, user.id, user.farm_name, 0, "daily_summary")
-    entry_id = db.create_entry(user.id, 0, {"voice_path": saved_path}, "Summary", {}, transcription="⏳ Transcribing...")
+    
+    # --- DB CALL (SQLite) ---
+    entry_id = db.create_entry(
+        user.id, 0, {"voice_path": saved_path}, 
+        "Summary", {}, 
+        category='evening',
+        transcription="⏳ Transcribing..."
+    )
+    
     context.application.create_task(run_transcription_bg(saved_path, entry_id))
     
     await update.message.reply_text("✅ **Summary Saved.**", reply_markup=MAIN_MENU_KBD)
@@ -208,9 +215,7 @@ async def save_evening_note(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def skip_evening(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("❌ Cancelled.")
-    # Restore keyboard
-    await query.message.reply_text("Use the menu below:", reply_markup=MAIN_MENU_KBD)
+    await query.message.reply_text("❌ Cancelled.", reply_markup=MAIN_MENU_KBD)
     return ConversationHandler.END
 
 # --- EXPORT HANDLERS ---
@@ -228,6 +233,7 @@ collection_handler = ConversationHandler(
         VOICE_LOOP: [CallbackQueryHandler(finalize_spot, pattern="voice_done"), MessageHandler(filters.VOICE, handle_voice), MessageHandler(filters.TEXT, route_intent)]
     },
     fallbacks=[MessageHandler(filters.TEXT, route_intent)],
+    per_message=False
 )
 
 evening_handler = ConversationHandler(
@@ -243,4 +249,5 @@ evening_handler = ConversationHandler(
         ]
     },
     fallbacks=[MessageHandler(filters.TEXT, route_intent)],
+    per_chat=True
 )
