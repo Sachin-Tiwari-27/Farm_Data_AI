@@ -203,6 +203,7 @@ async def show_date_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text("End of Log.", reply_markup=InlineKeyboardMarkup(kb))
     return VIEW_HISTORY
 
+
 # --- EXPORT ---
 history_handler = ConversationHandler(
     entry_points=[
@@ -225,5 +226,6 @@ history_handler = ConversationHandler(
         # SILENT KILLER SWITCH
         MessageHandler(filters.TEXT, route_intent)
     ],
-    
+    per_chat=True,
+    per_user=True
 )

@@ -3,7 +3,6 @@ import io
 import asyncio
 import logging
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
-from telegram.constants import ChatAction
 from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 import database as db
@@ -18,18 +17,26 @@ logger = logging.getLogger(__name__)
 # --- STATES ---
 (CAPTURE_WIDE, CAPTURE_CLOSE, CAPTURE_SOIL, CONFIRM_PHOTOS, LOG_STATUS, VOICE_LOOP) = range(6)
 
+
 # --- HELPERS ---
 async def run_transcription_bg(file_path, entry_id):
     if not file_path or not os.path.exists(file_path): return
     try:
-        loop = asyncio.get_running_loop()
-        text = await loop.run_in_executor(None, transcribe_audio, file_path)
-        if text: db.update_transcription(entry_id, text)
-    except Exception: pass
+        text = await transcribe_audio(file_path)
+        if text: 
+            db.update_transcription(entry_id, text)
+    except Exception as e:
+        logger.error(f"Background Transcription Failed: {e}")
+
 
 # --- MORNING FLOW START ---
 async def start_collection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = db.get_user_profile(update.effective_user.id)
+    user_id = update.effective_user.id
+    if db.is_routine_done(user_id, 'morning'):
+        await update.message.reply_text("✅ You've already completed your morning check-in today!")
+        return ConversationHandler.END    
+    
+    user = db.get_user_profile(user_id)
     if not user or not user.landmarks:
         await update.message.reply_text("⚠️ You have no landmarks set up. Use /start to configure them.")
         return ConversationHandler.END
@@ -114,7 +121,7 @@ async def ask_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
         [InlineKeyboardButton("🟢 Healthy", callback_data="Healthy")],
         [InlineKeyboardButton("🔴 Issue", callback_data="Issue")],
-        [InlineKeyboardButton("🟠 Unsure", callback_data="Unsure")]
+        [InlineKeyboardButton("🟠 Unsure", callback_data="Unsure")],
     ]
     await query.edit_message_text("🩺 **What is the status of this spot?**", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     return LOG_STATUS
@@ -183,9 +190,15 @@ async def finalize_spot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- EVENING FLOW ---
 async def start_evening_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if db.is_routine_done(user_id, 'evening'):
+        await update.message.reply_text("✅ You've already recorded your evening summary today!")
+        return ConversationHandler.END
+
     await update.message.reply_text(
         "🌙 **Evening Check-in**\n"
-        "Please record a voice note summarizing your day (activities, issues, plans for tomorrow).",
+        "Please record a voice note summarizing your day (activities, issues, plans for tomorrow)."
+        "\n\n🎙 _(Tap Record to send voice note)_",
         reply_markup=ReplyKeyboardRemove(),
         parse_mode='Markdown'
     )
@@ -217,6 +230,7 @@ async def skip_evening(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     await query.message.reply_text("❌ Cancelled.", reply_markup=MAIN_MENU_KBD)
     return ConversationHandler.END
+
 
 # --- EXPORT HANDLERS ---
 collection_handler = ConversationHandler(

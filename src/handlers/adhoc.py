@@ -121,6 +121,13 @@ async def buffer_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = update.effective_user.id
     f = await update.message.photo[-1].get_file()
+    
+    # Defensive init
+    if 'adhoc_photos' not in context.user_data:
+        context.user_data['adhoc_photos'] = []
+    if 'adhoc_voices' not in context.user_data:
+        context.user_data['adhoc_voices'] = []
+        
     idx = len(context.user_data['adhoc_photos'])
     path = await f.download_to_drive(f"data/media/{user_id}_adhoc_p{idx}.jpg")
     context.user_data['adhoc_photos'].append(path)
@@ -134,6 +141,13 @@ async def buffer_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     f = await update.message.voice.get_file()
     buf = io.BytesIO()
     await f.download_to_memory(buf)
+    
+    # Defensive init
+    if 'adhoc_photos' not in context.user_data:
+        context.user_data['adhoc_photos'] = []
+    if 'adhoc_voices' not in context.user_data:
+        context.user_data['adhoc_voices'] = []
+        
     context.user_data['adhoc_voices'].append(buf)
     
     await update_buffer_ui(update, context)
@@ -170,9 +184,30 @@ async def handle_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """User clicked Skip - cancel the ad-hoc entry"""
     query = update.callback_query
     await query.answer()
+    
+    # Cleanup temp photos if any
+    for p in context.user_data.get('adhoc_photos', []):
+        try: os.remove(p)
+        except: pass
+        
     await query.edit_message_text("❌ **Ad-hoc entry cancelled.**")
-    await query.message.reply_text("Use the menu below 👇 for other options", reply_markup=MAIN_MENU_KBD)
+    await query.message.reply_text("Action cancelled. Use the menu below 👇 for other options:", reply_markup=MAIN_MENU_KBD)
     return ConversationHandler.END
+
+async def handle_adhoc_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles text during ad-hoc entry - routes menu buttons but catches other text."""
+    res = await route_intent(update, context)
+    if res is not None:
+        return res # Successfully routed to another menu
+    
+    # Non-menu text received
+    await update.message.reply_text(
+        "📝 **Ad-Hoc Entry in progress...**\n"
+        "Please send **Photos** 📸 or **Voice Notes** 🎙.\n\n"
+        "Or tap **Done** or **Skip** button above to finish.",
+        parse_mode='Markdown'
+    )
+    return ADHOC_BUFFER
 
 async def ask_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -184,7 +219,7 @@ async def ask_tag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if p_count == 0 and v_count == 0:
         await query.edit_message_text("❌ **No content to save.**\n\nYou didn't send any photos or voice notes.")
-        await query.message.reply_text("Use the menu below:", reply_markup=MAIN_MENU_KBD)
+        await query.message.reply_text("\nUse the menu below 👇 for other options", reply_markup=MAIN_MENU_KBD)
         return ConversationHandler.END
     
     user_id = query.from_user.id
@@ -266,16 +301,18 @@ adhoc_handler = ConversationHandler(
         ADHOC_BUFFER: [
             MessageHandler(filters.PHOTO, buffer_photo),
             MessageHandler(filters.VOICE, buffer_voice),
-            CallbackQueryHandler(handle_add_more, pattern="add_more"),
-            CallbackQueryHandler(handle_skip, pattern="adhoc_skip"),
-            CallbackQueryHandler(ask_tag, pattern="adhoc_done"),
-            MessageHandler(filters.TEXT, route_intent)
+            CallbackQueryHandler(handle_add_more, pattern="^add_more$"),
+            CallbackQueryHandler(handle_skip, pattern="^adhoc_skip$"),
+            CallbackQueryHandler(ask_tag, pattern="^adhoc_done$"),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_adhoc_text)
         ],
         ADHOC_TAG: [CallbackQueryHandler(finalize_adhoc, pattern="^tag_")]
     },
     fallbacks=[
-        CommandHandler('cancel', start_adhoc_menu),
+        CommandHandler('cancel', handle_skip),
+        MessageHandler(filters.TEXT & filters.Regex("^❌ Cancel$"), handle_skip),
         MessageHandler(filters.TEXT, route_intent)
     ],
-    
+    per_chat=True,
+    per_user=True
 )

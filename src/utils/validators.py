@@ -35,6 +35,15 @@ def parse_time(input_str, is_evening=False):
             hour += 12
         elif meridian == 'am' and hour == 12:
             hour = 0
+    elif is_evening and hour < 12:
+        # Smart Context: If no am/pm given but we're in evening flow
+        hour += 12
+
+    # FINAL RANGE CHECK (User Request: Morning 0-11:59, Evening 12-23:59)
+    if is_evening:
+        if hour < 12: return None # Must be 12:00 or later
+    else:
+        if hour >= 12: return None # Must be before 12:00
             
     return f"{hour:02d}:{minute:02d}"
 

@@ -6,6 +6,7 @@ import database as db
 from utils.validators import parse_time, validate_landmark_count
 from handlers.router import route_intent
 from utils.menus import MAIN_MENU_KBD
+from utils.scheduler import schedule_user_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +232,21 @@ async def finish_onboarding(update_obj, context: ContextTypes.DEFAULT_TYPE):
     }
     
     db.save_user_profile(profile)
+
+    # SCHEDULE JOBS IMMEDIATELY
+    schedule_user_jobs(
+        context.application, 
+        user_id, 
+        user_data['p_time'], 
+        user_data['v_time']
+    )
+
+    await update.message.reply_text(
+        "✅ **Setup Complete!**\nI'll remind you at "
+        f"{user_data['p_time']} & {user_data['v_time']}.",
+        reply_markup=MAIN_MENU_KBD,
+        parse_mode='Markdown'
+    )
     
     final_msg = "✅ **Setup Complete!**\n\nYour farm is ready. You can edit specific spot details in the **Dashboard**."
     

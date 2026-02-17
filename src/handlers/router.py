@@ -1,6 +1,6 @@
 from telegram import Update
 from telegram.ext import ConversationHandler, ContextTypes
-from utils.menus import BTN_MORNING, BTN_EVENING, BTN_ADHOC, BTN_HISTORY, BTN_DASHBOARD
+from utils.menus import BTN_MORNING, BTN_EVENING, BTN_ADHOC, BTN_HISTORY, BTN_DASHBOARD, BTN_AI
 
 async def route_intent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -13,7 +13,7 @@ async def route_intent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     
     # Check if it's a menu button
-    if text not in [BTN_MORNING, BTN_EVENING, BTN_ADHOC, BTN_HISTORY, BTN_DASHBOARD]:
+    if text not in [BTN_MORNING, BTN_EVENING, BTN_ADHOC, BTN_HISTORY, BTN_DASHBOARD, BTN_AI]:
         return None  # Not a menu button, let the current handler deal with it
     
     # Clear state for clean switch
@@ -36,6 +36,9 @@ async def route_intent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await view_history(update, context)
     elif text == BTN_DASHBOARD:
         await view_dashboard(update, context)
+    elif text == BTN_AI:
+        from handlers.ai_chat import start_ai_chat
+        await start_ai_chat(update, context)
     
     # Always return END to exit current conversation
     return ConversationHandler.END

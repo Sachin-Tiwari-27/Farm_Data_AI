@@ -9,9 +9,9 @@ from datetime import datetime
 # --- CONFIGURATION ---
 DB_DIR = "data/db"
 MEDIA_DIR = "data/media"
-SQL_FILE = os.path.join(DB_DIR, "farm.db")  # The Source of Truth
-JSON_USERS = os.path.join(DB_DIR, "users.json") # The Shadow Mirror
-JSON_LOGS = os.path.join(DB_DIR, "logs.json")   # The Shadow Mirror
+SQL_FILE = os.path.join(DB_DIR, "farm.db")
+JSON_USERS = os.path.join(DB_DIR, "users.json")
+JSON_LOGS = os.path.join(DB_DIR, "logs.json")
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +26,11 @@ MED_MIX = "Soil + Cocopeat"
 MED_HYDRO = "Hydroponic"
 MED_OTHER = "Other"
 
-# --- DATA CLASSES (Kept for compatibility) ---
+# --- DATA CLASSES ---
 class Landmark:
     def __init__(self, data):
-        self.id = data.get('id')
+        # We now use 'landmark_id' (1-20) instead of global DB 'id'
+        self.id = data.get('landmark_id') or data.get('id')
         self.label = data.get('label', f"Spot {self.id}")
         self.env = data.get('env', ENV_FIELD)
         self.medium = data.get('medium', MED_SOIL)
@@ -49,9 +50,20 @@ class User:
         self.longitude = data.get('lon')
         self.photo_time = data.get('p_time')
         self.voice_time = data.get('v_time')
-        # Landmarks are passed as a list of dicts or objects
         lm_data = data.get('landmarks', [])
         self.landmarks = [Landmark(lm) if isinstance(lm, dict) else lm for lm in lm_data]
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.full_name,
+            "farm": self.farm_name,
+            "lat": self.latitude,
+            "lon": self.longitude,
+            "p_time": self.photo_time,
+            "v_time": self.voice_time,
+            "landmarks": [lm.to_dict() for lm in self.landmarks]
+        }
 
 class LogEntry:
     def __init__(self, data):
@@ -64,23 +76,28 @@ class LogEntry:
         self.files = data.get('files', {})
         self.transcription = data.get('transcription', "")
         self.weather = data.get('weather', {})
-        self.landmark_name = data.get('landmark_name', f"Spot {self.landmark_id}")
+        
+        # Smart Name Logic
+        self.landmark_name = data.get('landmark_name')
+        if not self.landmark_name or self.landmark_name == "General/Evening":
+            if self.category == 'evening': self.landmark_name = "Evening Summary"
+            elif self.landmark_id == 99: self.landmark_name = "General Ad-hoc"
+            else: self.landmark_name = f"Spot {self.landmark_id}"
 
 # --- DATABASE CORE ---
 def get_db():
-    conn = sqlite3.connect(SQL_FILE)
+    # check_same_thread=False is REQUIRED for background sync to work
+    conn = sqlite3.connect(SQL_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
-    """Creates the SQLite tables if they don't exist."""
     os.makedirs(DB_DIR, exist_ok=True)
     os.makedirs(MEDIA_DIR, exist_ok=True)
     
     conn = get_db()
     c = conn.cursor()
     
-    # 1. Users Table
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY,
         name TEXT, farm TEXT,
@@ -88,51 +105,114 @@ def init_db():
         p_time TEXT, v_time TEXT
     )''')
     
-    # 2. Landmarks Table
+    # --- MIGRATION: Landmark ID Logic ---
+    # Check if landmark_id column exists. If not, we migrate.
+    c.execute("PRAGMA table_info(landmarks)")
+    cols = [row[1] for row in c.fetchall()]
+    
+    if "landmark_id" not in cols and "user_id" in cols:
+        logger.info("Migrating landmarks to per-user ID schema...")
+        # 1. Backup old landmarks
+        c.execute("ALTER TABLE landmarks RENAME TO landmarks_old")
+        
+        # 2. Create New Table
+        c.execute('''CREATE TABLE landmarks (
+            user_id INTEGER,
+            landmark_id INTEGER,
+            label TEXT, env TEXT, medium TEXT,
+            PRIMARY KEY(user_id, landmark_id),
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )''')
+        
+        # 3. Migrate Data & Re-index Logs
+        # We need to map old global IDs to new per-user IDs (1, 2, 3...)
+        old_lms = c.execute("SELECT * FROM landmarks_old ORDER BY user_id, id").fetchall()
+        
+        user_counts = {}
+        for row in old_lms:
+            uid = row['user_id']
+            old_id = row['id']
+            
+            # Generate new 1-20 ID
+            new_id = user_counts.get(uid, 0) + 1
+            user_counts[uid] = new_id
+            
+            # Insert into new table
+            c.execute("""
+                INSERT INTO landmarks (user_id, landmark_id, label, env, medium)
+                VALUES (?, ?, ?, ?, ?)
+            """, (uid, new_id, row['label'], row['env'], row['medium']))
+            
+            # CRITICAL: Update logs to use the new ID
+            c.execute("UPDATE logs SET landmark_id = ? WHERE user_id = ? AND landmark_id = ?", (new_id, uid, old_id))
+            
+        c.execute("DROP TABLE landmarks_old")
+        logger.info("Landmark migration complete.")
+    
+    # Standard Creation (if first run)
     c.execute('''CREATE TABLE IF NOT EXISTS landmarks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
+        landmark_id INTEGER,
         label TEXT, env TEXT, medium TEXT,
+        PRIMARY KEY(user_id, landmark_id),
         FOREIGN KEY(user_id) REFERENCES users(id)
     )''')
     
-    # 3. Logs Table (The Event)
     c.execute('''CREATE TABLE IF NOT EXISTS logs (
         id TEXT PRIMARY KEY,
         user_id INTEGER,
         landmark_id INTEGER,
-        category TEXT,  -- 'morning', 'evening', 'adhoc'
+        category TEXT,
         status TEXT,
         timestamp TEXT,
-        date TEXT,      -- YYYY-MM-DD for fast indexing
+        date TEXT,
         weather_json TEXT,
         transcription TEXT
     )''')
     
-    # 4. Media Table (The Evidence)
     c.execute('''CREATE TABLE IF NOT EXISTS media (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         log_id TEXT,
         file_path TEXT,
-        file_type TEXT, -- 'wide', 'close', 'soil', 'voice', 'summary'
+        file_type TEXT,
         FOREIGN KEY(log_id) REFERENCES logs(id)
     )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS ai_interactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        log_id TEXT,
+        prompt TEXT,
+        response TEXT,
+        model_used TEXT,
+        rating INTEGER DEFAULT 0,
+        timestamp TEXT,
+        feedback_status TEXT DEFAULT 'NA',
+        feedback_note TEXT DEFAULT '',
+        FOREIGN KEY(log_id) REFERENCES logs(id)
+    )''')
+    
+    # --- MIGRATION: Add Feedback Columns ---
+    c.execute("PRAGMA table_info(ai_interactions)")
+    ai_cols = [row[1] for row in c.fetchall()]
+    if "feedback_status" not in ai_cols:
+        c.execute("ALTER TABLE ai_interactions ADD COLUMN feedback_status TEXT DEFAULT 'NA'")
+        c.execute("ALTER TABLE ai_interactions ADD COLUMN feedback_note TEXT DEFAULT ''")
     
     conn.commit()
     conn.close()
     
-    # Trigger initial sync to create empty JSONs if missing
-    if not os.path.exists(JSON_USERS) or not os.path.exists(JSON_LOGS):
+    # Trigger initial sync
+    if not os.path.exists(JSON_USERS):
         trigger_sync()
 
-# --- THE BACKGROUND WORKER (SHADOW SYNC) ---
+
 def sync_to_json_shadow():
-    """ Reads SQLite -> Overwrites JSON Files. Runs in background. """
     try:
         conn = get_db()
         cursor = conn.cursor()
         
-        # 1. Sync Users
+        # Sync Users
         cursor.execute("SELECT * FROM users")
         users_rows = cursor.fetchall()
         users_dict = {}
@@ -153,7 +233,7 @@ def sync_to_json_shadow():
         with open(JSON_USERS, 'w') as f:
             json.dump(users_dict, f, indent=4)
             
-        # 2. Sync Logs
+        # Sync Logs
         cursor.execute("SELECT * FROM logs ORDER BY timestamp DESC")
         log_rows = cursor.fetchall()
         logs_list = []
@@ -182,11 +262,11 @@ def sync_to_json_shadow():
             json.dump(logs_list, f, indent=4)
             
         conn.close()
-        
     except Exception as e:
         logger.error(f"Shadow Sync Failed: {e}")
 
 def trigger_sync():
+    # Run in background thread
     threading.Thread(target=sync_to_json_shadow, daemon=True).start()
 
 # --- USER FUNCTIONS ---
@@ -201,13 +281,25 @@ def get_user_profile(user_id):
     conn.close()
     
     user_data = dict(u)
+    # Map 'landmark_id' to the '.id' attribute for compatibility
     user_data['landmarks'] = [dict(l) for l in lms]
     return User(user_data)
+
+def update_user_schedule(user_id, p_time=None, v_time=None):
+    conn = get_db()
+    if p_time:
+        conn.execute("UPDATE users SET p_time=? WHERE id=?", (p_time, user_id))
+    if v_time:
+        conn.execute("UPDATE users SET v_time=? WHERE id=?", (v_time, user_id))
+    conn.commit()
+    conn.close()
+    trigger_sync()
 
 def save_user_profile(user_data):
     conn = get_db()
     c = conn.cursor()
     
+    # 1. Update User Info
     c.execute("""
         INSERT OR REPLACE INTO users (id, name, farm, lat, lon, p_time, v_time)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -217,17 +309,34 @@ def save_user_profile(user_data):
         user_data['p_time'], user_data['v_time']
     ))
     
+    # 2. Update Landmarks - Now using stable per-user IDs (1-20)
     c.execute("DELETE FROM landmarks WHERE user_id=?", (user_data['id'],))
+    
     for lm in user_data.get('landmarks', []):
         if hasattr(lm, 'to_dict'): lm = lm.to_dict()
+        
+        # We prioritize 'landmark_id' or 'id' from the dict
+        l_id = lm.get('landmark_id') or lm.get('id')
+        
         c.execute("""
-            INSERT INTO landmarks (user_id, label, env, medium)
-            VALUES (?, ?, ?, ?)
-        """, (user_data['id'], lm['label'], lm['env'], lm['medium']))
+            INSERT INTO landmarks (user_id, landmark_id, label, env, medium)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_data['id'], l_id, lm['label'], lm['env'], lm['medium']))
         
     conn.commit()
     conn.close()
     trigger_sync()
+
+def get_all_user_ids():
+    """Returns a list of all registered user IDs for job restoration."""
+    conn = get_db()
+    try:
+        rows = conn.execute("SELECT id FROM users").fetchall()
+        return [row['id'] for row in rows]
+    except Exception:
+        return []
+    finally:
+        conn.close()
 
 def get_user_landmarks(user_id):
     user = get_user_profile(user_id)
@@ -240,9 +349,58 @@ def get_landmark_by_id(user_id, landmark_id):
         if lm.id == int(landmark_id): return lm
     return None
 
-# --- LOGGING FUNCTIONS ---
+def get_pending_landmark_ids(user_id):
+    """ Returns list of landmark IDs that have NOT been checked this morning. """
+    conn = get_db()
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    all_lms = conn.execute("SELECT landmark_id FROM landmarks WHERE user_id=?", (user_id,)).fetchall()
+    all_ids = set(row['landmark_id'] for row in all_lms)
+    
+    done_lms = conn.execute("""
+        SELECT landmark_id FROM logs 
+        WHERE user_id=? AND date=? AND category='morning'
+    """, (user_id, today)).fetchall()
+    done_ids = set(row['landmark_id'] for row in done_lms)
+    
+    conn.close()
+    return sorted(list(all_ids - done_ids))
+
+# --- OTHER DB FUNCTIONS ---
+def get_entries_by_date_range(user_id, start_date, end_date):
+    conn = get_db()
+    s_str = start_date.strftime("%Y-%m-%d")
+    e_str = end_date.strftime("%Y-%m-%d")
+    query = "SELECT date, COUNT(*) as count FROM logs WHERE user_id=? AND date BETWEEN ? AND ? GROUP BY date"
+    rows = conn.execute(query, (user_id, s_str, e_str)).fetchall()
+    conn.close()
+    return {row['date']: row['count'] for row in rows}
+
+def is_routine_done(user_id, routine_type):
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = get_db()
+    try:
+        if routine_type == 'morning':
+            # Get count of user's current landmarks
+            lms = conn.execute("SELECT landmark_id FROM landmarks WHERE user_id=?", (user_id,)).fetchall()
+            current_ids = [row['landmark_id'] for row in lms]
+            
+            if not current_ids: return False
+            
+            # Count how many of THESE SPECIFIC IDs (1-20) have morning logs today
+            placeholders = ','.join(['?'] * len(current_ids))
+            query = f"SELECT COUNT(DISTINCT landmark_id) FROM logs WHERE user_id=? AND date=? AND category='morning' AND landmark_id IN ({placeholders})"
+            done_count = conn.execute(query, [user_id, today] + current_ids).fetchone()[0]
+            return done_count >= len(current_ids)
+            
+        elif routine_type == 'evening':
+            count = conn.execute("SELECT COUNT(*) FROM logs WHERE user_id=? AND date=? AND category='evening'", (user_id, today)).fetchone()[0]
+            return count > 0
+    finally:
+        conn.close()
+    return False
+
 def create_entry(user_id, landmark_id, file_paths, status, weather, category='adhoc', transcription=""):
-    """ Core function to save a log and map its media. """
     entry_id = str(uuid.uuid4())
     timestamp = datetime.now().isoformat()
     date_str = datetime.now().strftime("%Y-%m-%d")
@@ -250,18 +408,14 @@ def create_entry(user_id, landmark_id, file_paths, status, weather, category='ad
     
     conn = get_db()
     c = conn.cursor()
-    
-    # 1. Insert Log
     c.execute("""
         INSERT INTO logs (id, user_id, landmark_id, category, status, timestamp, date, weather_json, transcription)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (entry_id, user_id, landmark_id, category, status, timestamp, date_str, weather_json, transcription))
     
-    # 2. Insert Media
     for key, path in file_paths.items():
-        c.execute("INSERT INTO media (log_id, file_path, file_type) VALUES (?, ?, ?)", 
-                  (entry_id, path, key))
-        
+        c.execute("INSERT INTO media (log_id, file_path, file_type) VALUES (?, ?, ?)", (entry_id, path, key))
+    
     conn.commit()
     conn.close()
     trigger_sync()
@@ -274,51 +428,33 @@ def update_transcription(entry_id, text):
     conn.close()
     trigger_sync()
 
-# --- REPORTING & LOGIC ---
-def get_pending_landmark_ids(user_id):
-    """ Returns list of landmark IDs that have NOT been checked this morning. """
+def log_ai_interaction(user_id, prompt, response, model_used, log_id=None):
+    timestamp = datetime.now().isoformat()
     conn = get_db()
-    today = datetime.now().strftime("%Y-%m-%d")
-    
-    all_lms = conn.execute("SELECT id FROM landmarks WHERE user_id=?", (user_id,)).fetchall()
-    all_ids = set(row['id'] for row in all_lms)
-    
-    done_lms = conn.execute("""
-        SELECT landmark_id FROM logs 
-        WHERE user_id=? AND date=? AND category='morning'
-    """, (user_id, today)).fetchall()
-    done_ids = set(row['landmark_id'] for row in done_lms)
-    
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO ai_interactions (user_id, log_id, prompt, response, model_used, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+                 (user_id, log_id, prompt, response, model_used, timestamp))
+    conn.commit()
+    inserted_id = cursor.lastrowid
     conn.close()
-    return sorted(list(all_ids - done_ids))
+    return inserted_id
 
-def is_routine_done(user_id, routine_type):
+def update_ai_feedback(interaction_id, status, note=None):
     conn = get_db()
-    today = datetime.now().strftime("%Y-%m-%d")
-    
-    if routine_type == 'evening':
-        count = conn.execute("""
-            SELECT COUNT(*) FROM logs 
-            WHERE user_id=? AND date=? AND category='evening'
-        """, (user_id, today)).fetchone()[0]
-        conn.close()
-        return count > 0
-        
-    elif routine_type == 'morning':
-        conn.close()
-        return len(get_pending_landmark_ids(user_id)) == 0
-        
-    return False
-
-# --- HISTORY FUNCTIONS ---
+    if note is not None:
+        conn.execute("UPDATE ai_interactions SET feedback_status=?, feedback_note=? WHERE id=?", (status, note, interaction_id))
+    else:
+        conn.execute("UPDATE ai_interactions SET feedback_status=? WHERE id=?", (status, interaction_id))
+    conn.commit()
+    conn.close()
 
 def get_entries_for_date(user_id, date_str):
     conn = get_db()
-    # Updated query to JOIN with landmarks to get the Label (Name)
+    # Join on composite key: user_id AND landmark_id
     query = """
         SELECT l.*, lm.label as landmark_label 
         FROM logs l
-        LEFT JOIN landmarks lm ON l.landmark_id = lm.id
+        LEFT JOIN landmarks lm ON l.user_id = lm.user_id AND l.landmark_id = lm.landmark_id
         WHERE l.user_id=? AND l.date=?
     """
     logs = conn.execute(query, (user_id, date_str)).fetchall()
@@ -330,13 +466,12 @@ def get_entries_for_date(user_id, date_str):
         
         data = dict(log)
         data['files'] = files
-        # Map the joined label to the expected object attribute
-        data['landmark_name'] = log['landmark_label'] if log['landmark_label'] else "General/Evening"
+        data['landmark_name'] = log['landmark_label']
         data['weather'] = json.loads(log['weather_json']) if log['weather_json'] else {}
         result.append(LogEntry(data))
         
     conn.close()
     return result
 
-# Initialize on import
+# Initialize
 init_db()
