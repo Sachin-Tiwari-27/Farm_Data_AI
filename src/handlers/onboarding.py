@@ -234,8 +234,7 @@ async def finish_onboarding(update_obj, context: ContextTypes.DEFAULT_TYPE):
     
     db.save_user_profile(profile)
 
-    # FIX: Use context.user_data or the profile dict for scheduling
-    schedule_user_jobs(
+    await schedule_user_jobs(
         context.application, 
         user_id, 
         profile['p_time'], 

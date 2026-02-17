@@ -7,6 +7,7 @@ import database as db
 from handlers.router import route_intent
 from handlers.onboarding import cancel as global_cancel
 from utils.validators import parse_time
+from utils.scheduler import schedule_user_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -219,8 +220,8 @@ async def save_up_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Sync live JobQueue
     user = db.get_user_profile(user_id)
-    from utils.scheduler import schedule_user_jobs
-    schedule_user_jobs(context.application, user_id, user.photo_time, user.voice_time)
+    
+    await schedule_user_jobs(context.application, user_id, user.photo_time, user.voice_time)
     
     await update.message.reply_text("✅ Schedule updated and synced.")
     return await view_dashboard(update, context)
