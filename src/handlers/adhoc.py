@@ -314,8 +314,9 @@ adhoc_handler = ConversationHandler(
     fallbacks=[
         CommandHandler('cancel', handle_skip),
         MessageHandler(filters.TEXT & filters.Regex("^❌ Cancel$"), handle_skip),
-        MessageHandler(filters.TEXT, route_intent)
+        MessageHandler(filters.TEXT, lambda u, c: route_intent(u, c, is_fallback=True))
     ],
     per_chat=True,
-    per_user=True
+    per_user=True,
+    allow_reentry=True
 )

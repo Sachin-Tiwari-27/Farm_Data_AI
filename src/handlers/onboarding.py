@@ -278,6 +278,11 @@ onboarding_handler = ConversationHandler(
             CallbackQueryHandler(handle_naming_input)
         ]
     },
-    fallbacks=[CommandHandler('cancel', cancel)],
-    
+    fallbacks=[
+        CommandHandler('cancel', cancel),
+        MessageHandler(filters.TEXT, lambda u, c: route_intent(u, c, is_fallback=True))
+    ],
+    per_chat=True,
+    per_user=True,
+    allow_reentry=True
 )

@@ -149,7 +149,7 @@ async def handle_ai_context(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 3. Context Data
     location = {'lat': user.latitude, 'lon': user.longitude}
-    weather = get_weather_data(user.latitude, user.longitude)
+    weather = await get_weather_data(user.latitude, user.longitude)
 
     # 4. Trigger Background Task
     context.application.create_task(
@@ -311,7 +311,7 @@ ai_feedback_handler = ConversationHandler(
     },
     fallbacks=[
         CommandHandler('cancel', lambda u,c: ConversationHandler.END),
-        MessageHandler(filters.TEXT, route_intent) # Menu items exit flow
+        MessageHandler(filters.TEXT, lambda u, c: route_intent(u, c, is_fallback=True)) # Menu items exit flow
     ],
     per_chat=True,
     per_user=True
@@ -337,7 +337,7 @@ ai_handler = ConversationHandler(
     fallbacks=[
         CommandHandler('cancel', lambda u,c: ConversationHandler.END),
         MessageHandler(filters.TEXT & filters.Regex("^❌ Cancel$"), lambda u,c: ConversationHandler.END),
-        MessageHandler(filters.TEXT, route_intent)
+        MessageHandler(filters.TEXT, lambda u, c: route_intent(u, c, is_fallback=True))
     ],
     per_chat=True,
     per_user=True

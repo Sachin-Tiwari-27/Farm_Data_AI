@@ -223,9 +223,10 @@ history_handler = ConversationHandler(
     },
     fallbacks=[
         CommandHandler('cancel', view_history),
-        # SILENT KILLER SWITCH
-        MessageHandler(filters.TEXT, route_intent)
+        # FIXED: Returns END if not a menu button, letting global router handle it
+        MessageHandler(filters.TEXT, lambda u, c: route_intent(u, c, is_fallback=True))
     ],
     per_chat=True,
-    per_user=True
+    per_user=True,
+    allow_reentry=True
 )

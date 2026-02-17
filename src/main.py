@@ -82,17 +82,27 @@ async def global_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Let specific handlers catch these; do nothing here
         return 
 
-    # 2. GATEKEEPER CHECK (The Fix)
+    # 2. PROMPT UNREGISTERED USERS
     user = db.get_user_profile(user_id)
     
     if not user:
-        # If no profile exists, redirect to onboarding instead of crashing
-        return await start_onboarding(update, context)
+        # Instead of calling start_onboarding directly (which doesn't enter the conversation state),
+        # we guide the user to the proper entry point.
+        await update.message.reply_text(
+            "👋 **Welcome to Farm Diary!**\n\n"
+            "I don't see your profile yet. Please tap /start to begin your registration.",
+            parse_mode='Markdown'
+        )
+        return
 
     # 3. Regular welcome message for registered users
+    # Use getattr or default values to prevent crashes if profile is incomplete
+    farm_name = getattr(user, 'farm_name', 'your farm')
     await update.message.reply_text(
-        f"Welcome back to {user.farm_name}!", 
-        reply_markup=MAIN_MENU_KBD
+        f"Welcome back to **{farm_name}**! 🏠\n\n"
+        "How can I help you today?", 
+        reply_markup=MAIN_MENU_KBD,
+        parse_mode='Markdown'
     )
     
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

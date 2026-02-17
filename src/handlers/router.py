@@ -2,21 +2,34 @@ from telegram import Update
 from telegram.ext import ConversationHandler, ContextTypes
 from utils.menus import BTN_MORNING, BTN_EVENING, BTN_ADHOC, BTN_HISTORY, BTN_DASHBOARD, BTN_AI
 
-async def route_intent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def route_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, is_fallback: bool = False):
     """
     Checks if message is a menu command and routes to the appropriate handler.
     This allows seamless switching between conversation handlers.
+    
+    If it's not a menu button but is_fallback is True, it returns END 
+    to allow the global router to catch the message.
     """
-    if not update.message or not update.message.text:
+    if not update.message:
         return None
         
-    text = update.message.text
+    text = update.message.text or ""
     
-    # Check if it's a menu button
-    if text not in [BTN_MORNING, BTN_EVENING, BTN_ADHOC, BTN_HISTORY, BTN_DASHBOARD, BTN_AI]:
-        return None  # Not a menu button, let the current handler deal with it
+    # 1. Handle explicit commands that should always exit a flow
+    if text.startswith('/'):
+        if text in ['/start', '/cancel']:
+            return ConversationHandler.END
     
-    # Clear state for clean switch
+    # 2. Check if it's a menu button
+    # This list should match utils.menus.MENU_BUTTONS
+    menu_buttons = [BTN_MORNING, BTN_EVENING, BTN_ADHOC, BTN_HISTORY, BTN_DASHBOARD, BTN_AI]
+    
+    if text not in menu_buttons:
+        # If we are in a fallback handler, and it's not a menu button,
+        # we return END to let the global MessageHandler in main.py catch it.
+        return ConversationHandler.END if is_fallback else None
+    
+    # 3. Clear state for clean switch
     context.user_data.clear()
     
     # Import here to avoid circular imports

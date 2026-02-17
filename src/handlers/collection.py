@@ -248,8 +248,11 @@ collection_handler = ConversationHandler(
         LOG_STATUS: [CallbackQueryHandler(start_voice_loop)],
         VOICE_LOOP: [CallbackQueryHandler(finalize_spot, pattern="voice_done"), MessageHandler(filters.VOICE, handle_voice), MessageHandler(filters.TEXT, route_intent)]
     },
-    fallbacks=[MessageHandler(filters.TEXT, route_intent)],
-    per_message=False
+    fallbacks=[MessageHandler(filters.TEXT, lambda u, c: route_intent(u, c, is_fallback=True))],
+    per_message=False,
+    per_chat=True,
+    per_user=True,
+    allow_reentry=True
 )
 
 evening_handler = ConversationHandler(
@@ -261,9 +264,11 @@ evening_handler = ConversationHandler(
         VOICE_LOOP: [
             CallbackQueryHandler(skip_evening, pattern="voice_done"),
             MessageHandler(filters.VOICE, save_evening_note),
-            MessageHandler(filters.TEXT, route_intent)
+            MessageHandler(filters.TEXT, lambda u, c: route_intent(u, c))
         ]
     },
-    fallbacks=[MessageHandler(filters.TEXT, route_intent)],
-    per_chat=True
+    fallbacks=[MessageHandler(filters.TEXT, lambda u, c: route_intent(u, c, is_fallback=True))],
+    per_chat=True,
+    per_user=True,
+    allow_reentry=True
 )

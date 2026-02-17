@@ -317,7 +317,7 @@ dashboard_handler = ConversationHandler(
         CallbackQueryHandler(handle_dash_nav, pattern="^(page_|edit_|add_spot|close_dash|dash_up_times)")
     ],
     states={
-        DASH_MAIN: [CallbackQueryHandler(handle_dash_nav), MessageHandler(filters.TEXT, route_intent)],
+        DASH_MAIN: [CallbackQueryHandler(handle_dash_nav), MessageHandler(filters.TEXT, lambda u, c: route_intent(u, c, is_fallback=True))],
         DASH_EDIT_MENU: [CallbackQueryHandler(handle_edit_action)],
         DASH_RENAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_rename)],
         DASH_ENV: [CallbackQueryHandler(save_env)],
@@ -329,5 +329,7 @@ dashboard_handler = ConversationHandler(
         DASH_UP_VOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_up_voice)],
     },
     fallbacks=[CommandHandler('cancel', global_cancel)],
-    per_chat=True
+    per_chat=True,
+    per_user=True,
+    allow_reentry=True
 )
