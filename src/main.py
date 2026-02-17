@@ -75,16 +75,26 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # --- GLOBAL ROUTER (The Fallback) ---
 async def global_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    user_id = update.effective_user.id
     
-    # If the text is one of our main menu buttons, do nothing and let the 
-    # specific handlers (collection, history, etc.) catch it.
+    # 1. Menu Button Check
     if text in MENU_BUTTONS:
+        # Let specific handlers catch these; do nothing here
         return 
 
-    # Regular welcome message for non-menu text
-    user = db.get_user_profile(update.effective_user.id)
-    await update.message.reply_text(f"Welcome back to {user.farm_name}!", reply_markup=MAIN_MENU_KBD)
+    # 2. GATEKEEPER CHECK (The Fix)
+    user = db.get_user_profile(user_id)
+    
+    if not user:
+        # If no profile exists, redirect to onboarding instead of crashing
+        return await start_onboarding(update, context)
 
+    # 3. Regular welcome message for registered users
+    await update.message.reply_text(
+        f"Welcome back to {user.farm_name}!", 
+        reply_markup=MAIN_MENU_KBD
+    )
+    
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
     if isinstance(update, Update) and update.effective_message:

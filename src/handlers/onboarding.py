@@ -203,22 +203,23 @@ async def handle_naming_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # --- FINALIZE ---
 async def finish_onboarding(update_obj, context: ContextTypes.DEFAULT_TYPE):
-    current_list = context.user_data['final_landmarks']
-    target_count = context.user_data['l_count']
+    current_list = context.user_data.get('final_landmarks', [])
+    target_count = context.user_data.get('l_count', 0)
     
+    # Fill remaining spots if any
     next_id = len(current_list) + 1
     while len(current_list) < target_count:
         current_list.append({
-            "id": next_id,
+            "landmark_id": next_id,
             "label": f"Spot {next_id}",
             "env": context.user_data.get('batch_env', db.ENV_FIELD),
             "medium": context.user_data.get('batch_med', db.MED_SOIL)
         })
         next_id += 1
         
-    # FIX: Ensure user_id extraction works for both Message and CallbackQuery
     user_id = update_obj.from_user.id
     
+    # Prepare the profile dictionary using context.user_data
     profile = {
         'id': user_id,
         'name': context.user_data['name'],
@@ -233,35 +234,31 @@ async def finish_onboarding(update_obj, context: ContextTypes.DEFAULT_TYPE):
     
     db.save_user_profile(profile)
 
-    # SCHEDULE JOBS IMMEDIATELY
+    # FIX: Use context.user_data or the profile dict for scheduling
     schedule_user_jobs(
         context.application, 
         user_id, 
-        user_data['p_time'], 
-        user_data['v_time']
+        profile['p_time'], 
+        profile['v_time']
     )
 
-    await update.message.reply_text(
-        "✅ **Setup Complete!**\nI'll remind you at "
-        f"{user_data['p_time']} & {user_data['v_time']}.",
-        reply_markup=MAIN_MENU_KBD,
-        parse_mode='Markdown'
+    # Final success message logic
+    final_msg = (
+        "✅ **Setup Complete!**\n\n"
+        f"I'll remind you at {profile['p_time']} and {profile['v_time']}.\n"
+        "Your farm is ready! You can edit spot details in the Dashboard."
     )
-    
-    final_msg = "✅ **Setup Complete!**\n\nYour farm is ready. You can edit specific spot details in the **Dashboard**."
-    
-    kb = ReplyKeyboardMarkup([
-        ['📸 Start Morning Check-in'],
-        ['🎙 Record Evening Summary'],
-        ['📝 Quick Ad-Hoc Note'],
-        ['📊 View History', '👤 Dashboard']
-    ], resize_keyboard=True)
 
+    # Use the menu helper keyboard
+    from utils.menus import MAIN_MENU_KBD
+    
     if hasattr(update_obj, 'edit_message_text'):
+        # If called from a button click
         await update_obj.edit_message_text(final_msg, parse_mode='Markdown')
-        await update_obj.message.reply_text("👇 Use the menu below:", reply_markup=kb)
+        await update_obj.message.reply_text("👇 Use the menu below:", reply_markup=MAIN_MENU_KBD)
     else:
-        await update_obj.reply_text(final_msg, parse_mode='Markdown', reply_markup=kb)
+        # If called from a text message
+        await update_obj.reply_text(final_msg, parse_mode='Markdown', reply_markup=MAIN_MENU_KBD)
 
     return ConversationHandler.END
 
