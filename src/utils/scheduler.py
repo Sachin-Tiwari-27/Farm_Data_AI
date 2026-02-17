@@ -57,16 +57,28 @@ async def send_debug_alert(context: ContextTypes.DEFAULT_TYPE):
     )
 
 # --- MANAGER ---
-def schedule_user_jobs(application: Application, user_id: int, p_time_str: str, v_time_str: str):
-    """Removes old jobs for user and sets new ones."""
-    # 1. Clear existing jobs for this user
-    for job in application.job_queue.jobs():
-        if job.name and f"user_{user_id}" in job.name:
-            job.schedule_removal()
+async def schedule_user_jobs(application: Application, user_id: int, p_time_str: str, v_time_str: str):
+    """Removes old jobs for user and sets new ones with safety checks."""
+    
+    # 1. CRITICAL SAFETY CHECK: Ensure JobQueue is initialized
+    if not application.job_queue:
+        logger.error(f"❌ JobQueue not found. Cannot schedule jobs for user {user_id}. "
+                     "Ensure 'python-telegram-bot[job-queue]' is installed.")
+        return
 
-    # 2. Parse Times (Format "HH:MM" 24hr)
+    # 2. Clear existing jobs for this user using a safer method
     try:
-        # Get TZ from defaults, fallback to Dubai
+        # We use get_jobs_by_name to find specifically named jobs
+        for job_prefix in ["photo_user_", "voice_user_"]:
+            current_jobs = application.job_queue.get_jobs_by_name(f"{job_prefix}{user_id}")
+            for job in current_jobs:
+                job.schedule_removal()
+    except Exception as e:
+        logger.warning(f"Issue clearing old jobs for {user_id}: {e}")
+
+    # 3. Parse Times and Schedule
+    try:
+        # Get Timezone from defaults or fallback
         tz = None
         if hasattr(application, 'bot') and hasattr(application.bot, 'defaults'):
             tz = application.bot.defaults.tzinfo
@@ -106,12 +118,17 @@ def schedule_user_jobs(application: Application, user_id: int, p_time_str: str, 
 
 async def restore_scheduled_jobs(application: Application):
     """Called on startup to reload all schedules from DB."""
+    # Ensure JobQueue exists before trying to restore
+    if not application.job_queue:
+        logger.warning("⚠️ Skipping job restoration: JobQueue not initialized.")
+        return
+
     logger.info("🔄 Restoring scheduled jobs...")
     ids = db.get_all_user_ids()
     count = 0
     for uid in ids:
         user = db.get_user_profile(uid)
         if user and user.photo_time and user.voice_time:
-            schedule_user_jobs(application, uid, user.photo_time, user.voice_time)
+            await schedule_user_jobs(application, uid, user.photo_time, user.voice_time)
             count += 1
     logger.info(f"✅ Restored schedules for {count} users.")
