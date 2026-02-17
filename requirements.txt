@@ -6,3 +6,7 @@ pytz==2025.2
 
 # Transcription (AI)
 faster-whisper==1.2.1
+
+# Generative AI & Image Processing
+google-genai>=1.63.0
+pillow>=12.1.1

@@ -7,11 +7,16 @@ import logging
 from datetime import datetime
 
 # --- CONFIGURATION ---
-DB_DIR = "data/db"
-MEDIA_DIR = "data/media"
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_DIR = os.path.join(BASE_DIR, "data", "db")
+MEDIA_DIR = os.path.join(BASE_DIR, "data", "media")
 SQL_FILE = os.path.join(DB_DIR, "farm.db")
 JSON_USERS = os.path.join(DB_DIR, "users.json")
 JSON_LOGS = os.path.join(DB_DIR, "logs.json")
+
+# Ensure directories exist on the cloud server
+os.makedirs(DB_DIR, exist_ok=True)
+os.makedirs(MEDIA_DIR, exist_ok=True)
 
 logger = logging.getLogger(__name__)
 
@@ -86,8 +91,10 @@ class LogEntry:
 
 # --- DATABASE CORE ---
 def get_db():
-    # check_same_thread=False is REQUIRED for background sync to work
+    # check_same_thread=False is required for background shadow sync
     conn = sqlite3.connect(SQL_FILE, check_same_thread=False)
+    # Enable WAL mode for cloud concurrency (multiple readers/one writer)
+    conn.execute("PRAGMA journal_mode=WAL;") 
     conn.row_factory = sqlite3.Row
     return conn
 
