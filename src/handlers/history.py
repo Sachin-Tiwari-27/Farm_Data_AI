@@ -81,7 +81,7 @@ async def show_single_day_summary(update, context, data_key):
         if e.landmark_id == 99: adhoc_count += 1; continue
         if e.landmark_id == 0: evening_done = True; continue
         
-        icon = "🟢" if e.status == "Healthy" else "🔴" if e.status == "Issue" else "🟠"
+        icon = "🟢" if e.status == "Healthy" else "🔴" if e.status == "Issue" else "🟠" if e.status == "Unsure" else "🟣"
         lines.append(f"{icon} **{e.landmark_name}**: {e.status}")
         
     # Check Morning Status (Source of Truth)

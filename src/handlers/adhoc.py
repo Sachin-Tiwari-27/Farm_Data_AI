@@ -266,13 +266,16 @@ async def finalize_adhoc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         saved_paths[f"voice_{i}"] = path
         bg_voices.append(path)
         
+    # Fetch weather asynchronously
+    weather = await get_weather_data(user.latitude, user.longitude)
+    
     # --- DB CALL UPDATED ---
     entry_id = db.create_entry(
         user.id, 
         lm_id, 
         saved_paths, 
         "Observation", 
-        get_weather_data(user.latitude, user.longitude), 
+        weather or {}, 
         category='adhoc',
         transcription="⏳ Transcribing..." if bg_voices else ""
     )

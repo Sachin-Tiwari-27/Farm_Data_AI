@@ -60,7 +60,6 @@ async def ask_wide_shot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Reset temp storage for this specific spot
     context.user_data['temp_photos'] = {}
     context.user_data['temp_voices'] = []
-    context.user_data['weather'] = get_weather_data(db.get_user_profile(update.effective_user.id).latitude, db.get_user_profile(update.effective_user.id).longitude)
     
     msg_text = (
         f"📍 **Spot {ptr+1}/{len(queue)}: {lm.label}**\n"
@@ -173,11 +172,14 @@ async def finalize_spot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         saved_paths[f"voice_{i}"] = path
         bg_voices.append(path)
         
+    # Get weather right before saving (non-blocking now)
+    weather = await get_weather_data(user.latitude, user.longitude)
+    
     # --- DB CALL (SQLite) ---
     entry_id = db.create_entry(
         user.id, lm.id, saved_paths, 
         context.user_data['temp_status'], 
-        context.user_data.get('weather', {}),
+        weather or {},
         category='morning' 
     )
     
