@@ -283,7 +283,14 @@ async def finalize_adhoc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for v in bg_voices:
         context.application.create_task(run_transcription_bg(v, entry_id))
         
-    await query.edit_message_text(f"✅ **Ad-Hoc Entry Saved to {'General' if lm_id == 99 else 'Spot ' + str(lm_id)}**")
+    # Get Name for confirmation
+    if lm_id == 99:
+        saved_to = "General Observation"
+    else:
+        lm = db.get_landmark_by_id(user_id, lm_id)
+        saved_to = lm.label if lm else f"Spot {lm_id}"
+        
+    await query.edit_message_text(f"✅ **Ad-Hoc Entry Saved to {saved_to}**")
     await query.message.reply_text("Use the menu below:", reply_markup=MAIN_MENU_KBD)
     
     # Cleanup session

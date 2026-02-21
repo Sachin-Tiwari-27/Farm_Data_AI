@@ -195,6 +195,11 @@ async def handle_edit_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return DASH_EDIT_MENU
 
 async def save_up_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check for menu switching intent
+    res = await route_intent(update, context)
+    if res is not None:
+        return res
+        
     user_id = update.effective_user.id
     raw_text = update.message.text
     new_time = parse_time(raw_text, is_evening=False)
@@ -208,6 +213,11 @@ async def save_up_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return DASH_UP_VOICE
 
 async def save_up_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check for menu switching intent
+    res = await route_intent(update, context)
+    if res is not None:
+        return res
+        
     user_id = update.effective_user.id
     raw_text = update.message.text
     new_time = parse_time(raw_text, is_evening=True)
@@ -228,6 +238,11 @@ async def save_up_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- SAVE HANDLERS ---
 async def save_rename(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check for menu switching intent
+    res = await route_intent(update, context)
+    if res is not None:
+        return res
+        
     user = db.get_user_profile(update.effective_user.id)
     lm_id = context.user_data.get('edit_lm_id')
     new_name = update.message.text
@@ -272,6 +287,11 @@ async def save_med(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- ADD NEW SPOT FLOW ---
 async def add_spot_get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check for menu switching intent
+    res = await route_intent(update, context)
+    if res is not None:
+        return res
+        
     name = "New Spot"
     if update.message and update.message.text:
         name = update.message.text

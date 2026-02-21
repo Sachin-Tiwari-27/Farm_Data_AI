@@ -32,11 +32,15 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- BASIC PROFILE STEPS ---
 async def get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    res = await route_intent(update, context)
+    if res is not None: return res
     context.user_data['name'] = update.message.text
     await update.message.reply_text("Step 2: **Farm Name**?", parse_mode='Markdown')
     return FARM
 
 async def get_farm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    res = await route_intent(update, context)
+    if res is not None: return res
     context.user_data['farm'] = update.message.text
     kb = [[KeyboardButton("📍 Share Farm Location", request_location=True)]]
     await update.message.reply_text("Step 3: **Location**.", reply_markup=ReplyKeyboardMarkup(kb, one_time_keyboard=True), parse_mode='Markdown')
@@ -54,6 +58,8 @@ async def get_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return P_TIME
 
 async def get_p_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    res = await route_intent(update, context)
+    if res is not None: return res
     t = parse_time(update.message.text, is_evening=False)
     if not t: 
         await update.message.reply_text("⚠️ Invalid time. Try '07:00' or '7'.")
@@ -63,6 +69,8 @@ async def get_p_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return V_TIME
 
 async def get_v_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    res = await route_intent(update, context)
+    if res is not None: return res
     t = parse_time(update.message.text, is_evening=True)
     if not t: 
         await update.message.reply_text("⚠️ Invalid time. Try '18:00' or '6'.")
@@ -183,6 +191,8 @@ async def handle_naming_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         name = f"Spot {idx}"
         msg_obj = query
     else:
+        res = await route_intent(update, context)
+        if res is not None: return res
         name = update.message.text
         # FIX: Pass the message object itself, so msg_obj.from_user works later
         msg_obj = update.message 

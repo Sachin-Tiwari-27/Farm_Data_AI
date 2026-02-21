@@ -72,29 +72,55 @@ async def show_single_day_summary(update, context, data_key):
     d_str = target.strftime("%Y-%m-%d")
     entries = db.get_entries_for_date(user_id, d_str)
     
-    # Build List
-    lines = []
-    adhoc_count = 0
+    # 1. Grouping Logic
+    groups = {} # landmark_id -> [entries]
     evening_done = False
     
     for e in entries:
-        if e.landmark_id == 99: adhoc_count += 1; continue
-        if e.landmark_id == 0: evening_done = True; continue
+        if e.landmark_id == 0:
+            evening_done = True
+            continue
+        if e.landmark_id not in groups:
+            groups[e.landmark_id] = []
+        groups[e.landmark_id].append(e)
         
-        icon = "🟢" if e.status == "Healthy" else "🔴" if e.status == "Issue" else "🟠" if e.status == "Unsure" else "🟣"
-        lines.append(f"{icon} **{e.landmark_name}**: {e.status}")
+    # 2. Build Lines
+    lines = []
+    
+    # Sort IDs: 1, 2, 3... then 99 (General)
+    sorted_ids = sorted([gid for gid in groups.keys() if gid != 99])
+    if 99 in groups:
+        sorted_ids.append(99)
         
-    # Check Morning Status (Source of Truth)
+    for gid in sorted_ids:
+        spot_entries = groups[gid]
+        name = spot_entries[0].landmark_name
+        
+        # Determine consolidated icon/status
+        status_set = set()
+        for e in spot_entries:
+            if e.status: status_set.add(e.status)
+            
+        # Priority: Issue > Unsure > Healthy > Other
+        if "Issue" in status_set: icon = "🔴"
+        elif "Unsure" in status_set: icon = "🟠"
+        elif "Healthy" in status_set: icon = "🟢"
+        else: icon = "🟣"
+            
+        summary_status = " / ".join(filter(None, sorted(list(status_set))))
+        if not summary_status: summary_status = "Observation"
+        
+        lines.append(f"{icon} **{name}**: {summary_status}")
+
+    # Check Morning Status
     pending = db.get_pending_landmark_ids(user_id)
     am_status = "✅ Done" if not pending else f"⚠️ {len(pending)} Pending"
-    if 'yesterday' in data_key: am_status = "n/a" # Only relevant for today
+    if 'yesterday' in data_key: am_status = "n/a"
     
     summary = (f"📊 **{title}**\n"
                f"☀️ Morning: {am_status}\n"
                f"🌙 Evening: {'✅ Done' if evening_done else '❌ Pending'}\n"
                f"━━━━━━━━━━━━\n" + ("\n".join(lines) if lines else "_No routine logs._"))
-               
-    if adhoc_count: summary += f"\n\n📝 Ad-Hoc Notes: {adhoc_count}"
     
     kb = [
         [InlineKeyboardButton("📸 View Details", callback_data=f"view_date_{d_str}")],

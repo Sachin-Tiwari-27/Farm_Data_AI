@@ -84,10 +84,13 @@ class LogEntry:
         
         # Smart Name Logic
         self.landmark_name = data.get('landmark_name')
-        if not self.landmark_name or self.landmark_name == "General/Evening":
-            if self.category == 'evening': self.landmark_name = "Evening Summary"
-            elif self.landmark_id == 99: self.landmark_name = "General Ad-hoc"
-            else: self.landmark_name = f"Spot {self.landmark_id}"
+        if not self.landmark_name or self.landmark_name in ["General/Evening", "None"]:
+            if self.category == 'evening' or self.landmark_id == 0: 
+                self.landmark_name = "Evening Summary"
+            elif self.landmark_id == 99: 
+                self.landmark_name = "General Observation"
+            else: 
+                self.landmark_name = f"Spot {self.landmark_id}"
 
 # --- DATABASE CORE ---
 def get_db():
@@ -139,6 +142,9 @@ def init_db():
         for row in old_lms:
             uid = row['user_id']
             old_id = row['id']
+            
+            # Skip reserved IDs during re-indexing
+            if old_id in [0, 99]: continue
             
             # Generate new 1-20 ID
             new_id = user_counts.get(uid, 0) + 1
@@ -317,13 +323,26 @@ def save_user_profile(user_data):
     ))
     
     # 2. Update Landmarks - Now using stable per-user IDs (1-20)
+    # We fetch existing to preserve IDs if not provided
+    existing_lms = c.execute("SELECT landmark_id, label FROM landmarks WHERE user_id=?", (user_data['id'],)).fetchall()
+    lm_map = {row['label']: row['landmark_id'] for row in existing_lms}
+    
     c.execute("DELETE FROM landmarks WHERE user_id=?", (user_data['id'],))
+    
+    # Find next available ID (excluding reserved 99)
+    current_ids = [row['landmark_id'] for row in existing_lms if row['landmark_id'] != 99]
+    next_id = max(current_ids, default=0) + 1
     
     for lm in user_data.get('landmarks', []):
         if hasattr(lm, 'to_dict'): lm = lm.to_dict()
         
-        # We prioritize 'landmark_id' or 'id' from the dict
         l_id = lm.get('landmark_id') or lm.get('id')
+        
+        # If no ID, try to match by label or assign new
+        if not l_id:
+            l_id = lm_map.get(lm['label'], next_id)
+            if l_id == next_id:
+                next_id += 1
         
         c.execute("""
             INSERT INTO landmarks (user_id, landmark_id, label, env, medium)
