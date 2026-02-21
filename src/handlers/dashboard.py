@@ -115,9 +115,14 @@ async def handle_dash_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await view_dashboard(update, context)
         
     if action.startswith("edit_"):
+        suffix = action.split("_")[1]
+        if not suffix.isdigit():
+            # Not a landmark selection, let other handlers handle it
+            return None
+            
         await query.answer()
         try:
-            lm_id = int(action.split("_")[1])
+            lm_id = int(suffix)
             return await show_edit_menu(update, context, lm_id)
         except (IndexError, ValueError):
             await query.edit_message_text("❌ Error: Invalid ID.")
@@ -334,7 +339,7 @@ dashboard_handler = ConversationHandler(
     entry_points=[
         CommandHandler('profile', view_dashboard), 
         MessageHandler(filters.Regex("^👤 Dashboard$"), view_dashboard),
-        CallbackQueryHandler(handle_dash_nav, pattern="^(page_|edit_|add_spot|close_dash|dash_up_times)")
+        CallbackQueryHandler(handle_dash_nav, pattern="^(page_|edit_\\d+|add_spot|close_dash|dash_up_times)")
     ],
     states={
         DASH_MAIN: [CallbackQueryHandler(handle_dash_nav), MessageHandler(filters.TEXT, lambda u, c: route_intent(u, c, is_fallback=True))],
